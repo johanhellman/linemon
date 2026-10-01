@@ -12,6 +12,63 @@ Optionally it captures the ISP router's own status through a router-specific hoo
 The output is evidence for an ISP, so **correct timestamps and honest results matter
 more than features**.
 
+## Product principles
+
+These hold across the whole roadmap ([docs/roadmap.md](docs/roadmap.md)). A change
+that conflicts with one needs an explicit decision, recorded in the pull request,
+not a quiet exception.
+
+1. **An independent witness for the line.** linemon watches the connection between the
+   home and the ISP, from its own cable, independently of the user's own router. Its
+   value is that its account can be trusted when the ISP and the user disagree.
+2. **Evidence before features.** Timestamps, outage boundaries and classifications must
+   be correct and explainable. A feature that makes results less trustworthy (guessing,
+   smoothing away outages, hiding gaps) is not worth having.
+3. **Honest about what it doesn't know.** When the monitor itself was down, unplugged or
+   unsynchronised, that time is *unknown*, never counted as *up*. Uncertain
+   classifications say so.
+4. **Never lose an outage.** Outages are written durably the moment they start. Storage,
+   retention and upgrades must preserve them; deleting data is always explicit and
+   backed up (see `trim.py`).
+5. **Observe, don't interfere.** linemon only reads. It doesn't restart routers, change
+   ISP equipment settings, or put meaningful load on the line, because any of these
+   would change the thing being measured or destroy evidence.
+6. **Runs unattended on a stock Pi.** The core needs nothing beyond Raspberry Pi OS:
+   Python's standard library and `ping`. It must survive reboots, power cuts, network
+   changes and months of data without care.
+7. **Private by default.** Data stays on the device and the local network. Nothing is
+   sent anywhere unless the user configures it, and reports leave out personal details
+   unless the user adds them.
+
+## Boundaries
+
+| linemon does | linemon does not |
+|---|---|
+| Monitor the path from the home to the ISP and the internet | Monitor devices, Wi-Fi or traffic on the home network |
+| Read the ISP router's own status, read-only | Change router settings, restart equipment or work around faults |
+| Light probes (pings, DNS lookups, TTL-limited pings) | Speed tests or anything that loads the line (parked, see the roadmap) |
+| Serve a read-only status page on the local network | Expose itself to the internet or offer accounts and logins |
+| Send notifications the user configures | Phone home, collect telemetry or depend on a cloud service for the core |
+| Export data and reports for the user to share | Keep personal details (address, customer numbers) unless the user adds them |
+
+**Core and extras.** The core (monitor, analyzer, web page, trim, install) stays
+standard library only. Optional extras (router hooks, notification channels, metrics
+interfaces) may use other tools only if the core works without them, they are off by
+default, and their absence is handled gracefully.
+
+## Working on the roadmap
+
+- New capabilities start as a **spike**: a time-boxed investigation that answers one
+  question. Spikes are GitHub issues labelled `spike`, written with the spike template.
+- A spike's output is a **findings note** in `docs/spikes/` (see
+  [docs/spikes/README.md](docs/spikes/README.md)) and follow-up implementation issues.
+  Spikes may include throwaway prototype code, but they don't ship features.
+- Check spikes against the principles and boundaries above before starting. If a spike
+  finds that a feature can't be built within them, that is a valid result: record it
+  and park the feature in the roadmap.
+- Keep [docs/roadmap.md](docs/roadmap.md) in step: link findings, and move items between
+  phases or to *Parked* with the reason.
+
 ## Layout
 
 | Path | What |
@@ -23,6 +80,8 @@ more than features**.
 | `trim.py` | Deletes data from before a given time, with a backup first; only while the monitor is stopped |
 | `install.sh` | Installs or upgrades the services; restarts the monitor only if `linemon.py` or its unit changed |
 | `docs/checks.md` | The exact checks, outage rules, hook contract and file formats |
+| `docs/roadmap.md` | Roadmap phases, spikes and parked ideas |
+| `docs/spikes/` | Spike process, findings template and findings notes |
 | `tests/` | `unittest` suite with sanitised router fixtures and a fake router |
 
 ## Commands
