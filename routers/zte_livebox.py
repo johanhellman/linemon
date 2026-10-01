@@ -121,7 +121,12 @@ class Router:
             body = r.read().decode('utf-8', 'replace')
             if self.debug:
                 self._trace(req, r, data, body)
-            return body
+        # Every page embeds a fresh session token, and only the latest one is
+        # accepted for POSTs such as logout.
+        m = re.search(r'_sessionTmpToken = "([^"]*)"', body)
+        if m and m.group(1):
+            self.session_token = re.sub(r'\\x([0-9a-fA-F]{2})', lambda x: chr(int(x.group(1), 16)), m.group(1))
+        return body
 
     def _trace(self, req, r, data, body):
         """Print one request to stderr: never cookie values, the password or its hash."""
@@ -133,13 +138,6 @@ class Router:
         print(f'--- {req.get_method()} {req.full_url}\n    form: {fields}\n    status: {r.status}  '
               f'set-cookie: {set_cookies}  cookies now held: {sent}\n    body: {snippet.strip()[:400]}',
               file=sys.stderr)
-
-    def _page_token(self):
-        """The session token the web pages embed as _sessionTmpToken ("\\x48\\x4f..." escaped)."""
-        m = re.search(r'_sessionTmpToken = "([^"]*)"', self._open(''))
-        if not m:
-            return ''
-        return re.sub(r'\\x([0-9a-fA-F]{2})', lambda x: chr(int(x.group(1), 16)), m.group(1))
 
     def login(self):
         self._open('')  # sets the initial session cookie
@@ -153,19 +151,23 @@ class Router:
         }))
         if not result.get('login_need_refresh'):
             raise LoginError(json.dumps(result)[:200])
-        self.session_token = self._page_token()
 
     def logout(self):
+        """Log out, so the session doesn't linger. Returns whether the router confirmed it."""
         try:
-            self._open('_type=loginData&_tag=logout_entry', {'IF_LogOff': 1, '_sessionTOKEN': self.session_token})
+            body = self._open('_type=loginData&_tag=logout_entry', {'IF_LogOff': 1, '_sessionTOKEN': self.session_token})
+            return bool(json.loads(body).get('need_refresh'))
         except Exception:
-            pass
+            return False
 
     def read(self):
+        # The router only serves a page's data while the session is "on" that page:
+        # the internet status belongs to the home page, the fibre status to the LED page.
         ms = int(time.time() * 1000)
-        self._open(f'_type=menuView&_tag=vmenu-ledstatus&Menu3Location=0&_={ms}')
-        led = self._open(f'_type=menuData&_tag=osp_led_status_orange_lua.lua&_={ms + 1}')
-        wan = self._open(f'_type=menuData&_tag=wan_internetstatus_lua.lua&TypeUplink=2&pageType=1&_={ms + 2}')
+        self._open('')  # home page
+        wan = self._open(f'_type=menuData&_tag=wan_internetstatus_lua.lua&TypeUplink=2&pageType=1&_={ms}')
+        self._open(f'_type=menuView&_tag=vmenu-ledstatus&Menu3Location=0&_={ms + 1}')
+        led = self._open(f'_type=menuData&_tag=osp_led_status_orange_lua.lua&_={ms + 2}')
         return led, wan
 
 

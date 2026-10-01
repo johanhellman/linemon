@@ -95,6 +95,9 @@ class FakeLivebox(BaseHTTPRequestHandler):
     login_token = '24857193'
     logins = []
     logouts = []
+    page = None
+    token_counter = 0
+    current_token = None
 
     def log_message(self, *args):
         pass
@@ -112,12 +115,23 @@ class FakeLivebox(BaseHTTPRequestHandler):
     def logged_in(self):
         return 'SID=good' in self.headers.get('Cookie', '')
 
+    def page_token(self):
+        """Like the real router, every page carries a new session token; only the latest is valid."""
+        FakeLivebox.token_counter += 1
+        FakeLivebox.current_token = f'T{FakeLivebox.token_counter}'
+        escaped = ''.join(f'\\x{ord(c):02x}' for c in FakeLivebox.current_token)
+        return f'<script>var _sessionTmpToken = "{escaped}";</script>'
+
+    def session_timeout(self):
+        self.reply('<ajax_response_xml_root><IF_ERRORSTR>SessionTimeout</IF_ERRORSTR></ajax_response_xml_root>')
+
     def do_GET(self):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         tag = q.get('_tag', [''])[0]
         if not q:
             if self.logged_in():
-                self.reply('<script>var _sessionTmpToken = "\\x41\\x42\\x43";</script>', 'text/html')
+                FakeLivebox.page = 'home'
+                self.reply(self.page_token(), 'text/html')
             else:
                 self.reply('<script>var _sessionTmpToken = "";</script>', 'text/html', cookie='SID=new; path=/')
         elif tag == 'login_entry':
@@ -125,13 +139,17 @@ class FakeLivebox(BaseHTTPRequestHandler):
         elif tag == 'login_token':
             self.reply(f'<ajax_response_xml_root>{self.login_token}</ajax_response_xml_root>')
         elif not self.logged_in():
-            self.reply('<html>login page</html>', 'text/html')
+            self.session_timeout()
+        elif q.get('_type') == ['menuView']:
+            FakeLivebox.page = tag
+            self.reply(self.page_token(), 'text/html')
+        # Like the real router, a page's data is only served while the session is on that page.
         elif tag == 'osp_led_status_orange_lua.lua':
-            self.reply(fixture('led_ok.xml'))
+            self.reply(fixture('led_ok.xml')) if FakeLivebox.page == 'vmenu-ledstatus' else self.session_timeout()
         elif tag == 'wan_internetstatus_lua.lua':
-            self.reply(fixture('wan_ok.xml'))
+            self.reply(fixture('wan_ok.xml')) if FakeLivebox.page == 'home' else self.session_timeout()
         else:
-            self.reply('<ajax_response_xml_root><IF_ERRORSTR>SUCC</IF_ERRORSTR></ajax_response_xml_root>')
+            self.session_timeout()
 
     def do_POST(self):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -145,8 +163,9 @@ class FakeLivebox(BaseHTTPRequestHandler):
             self.reply(json.dumps({'login_need_refresh': ok, 'loginErrMsg': '' if ok else 'wrong password'}),
                        'application/json', cookie='SID=good; path=/' if ok else None)
         elif tag == 'logout_entry':
-            FakeLivebox.logouts.append(form.get('_sessionTOKEN'))
-            self.reply(json.dumps({'need_refresh': True}), 'application/json')
+            ok = form.get('_sessionTOKEN') == [FakeLivebox.current_token]
+            FakeLivebox.logouts.append(ok)
+            self.reply(json.dumps({'need_refresh': ok}), 'application/json')
 
 
 class LiveboxCapture(unittest.TestCase):
@@ -177,7 +196,7 @@ class LiveboxCapture(unittest.TestCase):
         self.assertEqual(FakeLivebox.logins, [True])
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['uptime_s'], 1060)
-        self.assertEqual(FakeLivebox.logouts, [['ABC']])  # the decoded _sessionTmpToken
+        self.assertEqual(FakeLivebox.logouts, [True])  # logged out with the latest session token
         self.assertEqual(sorted(os.listdir(capture_dir)), ['led_status.xml', 'wan_status.xml'])
 
     def test_periodic_capture_keeps_no_raw_files(self):
