@@ -10,6 +10,7 @@ out, and prints one JSON line:
 
   zte_livebox.py          run as a linemon hook (uses LINEMON_* environment)
   zte_livebox.py --test   print the status, to check the configuration
+  zte_livebox.py --debug  also trace every request to stderr (no secrets)
 
 Credentials are read from /etc/linemon/router.conf (override with
 LINEMON_ROUTER_CONF), which should be readable by root only:
@@ -105,10 +106,11 @@ def summarise(led, wan):
 
 
 class Router:
-    def __init__(self, host, username, password, timeout=8):
+    def __init__(self, host, username, password, timeout=8, debug=False):
         self.base = f'http://{host}/'
-        self.username, self.password, self.timeout = username, password, timeout
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.username, self.password, self.timeout, self.debug = username, password, timeout, debug
+        self.cookies = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
         self.session_token = ''
 
     def _open(self, query, data=None):
@@ -116,7 +118,21 @@ class Router:
                                      data=urllib.parse.urlencode(data).encode() if data is not None else None,
                                      headers={'Referer': self.base, 'X-Requested-With': 'XMLHttpRequest'})
         with self.opener.open(req, timeout=self.timeout) as r:
-            return r.read().decode('utf-8', 'replace')
+            body = r.read().decode('utf-8', 'replace')
+            if self.debug:
+                self._trace(req, r, data, body)
+            return body
+
+    def _trace(self, req, r, data, body):
+        """Print one request to stderr: never cookie values, the password or its hash."""
+        fields = {k: ('<hidden>' if k in ('Password', '_sessionTOKEN') else v) for k, v in (data or {}).items()}
+        set_cookies = [h.split('=', 1)[0] for h in r.headers.get_all('Set-Cookie') or []]
+        sent = sorted({c.name for c in self.cookies})
+        snippet = body if len(body) < 400 else f'<{len(body)} bytes, _sessionTmpToken found: {"_sessionTmpToken" in body}>'
+        snippet = re.sub(r'("sess_token"\s*:\s*")[^"]*', r'\1<hidden>', snippet)
+        print(f'--- {req.get_method()} {req.full_url}\n    form: {fields}\n    status: {r.status}  '
+              f'set-cookie: {set_cookies}  cookies now held: {sent}\n    body: {snippet.strip()[:400]}',
+              file=sys.stderr)
 
     def _page_token(self):
         """The session token the web pages embed as _sessionTmpToken ("\\x48\\x4f..." escaped)."""
@@ -170,7 +186,8 @@ def capture():
     except FileNotFoundError:
         pass
 
-    router = Router(r.get('host', '192.168.1.1'), r.get('username', 'admin'), r.get('password', ''))
+    router = Router(r.get('host', '192.168.1.1'), r.get('username', 'admin'), r.get('password', ''),
+                    debug='--debug' in sys.argv)
     try:
         router.login()
     except LoginError as e:
@@ -199,7 +216,7 @@ def capture():
 
 if __name__ == '__main__':
     result = capture()
-    if '--test' in sys.argv:
+    if '--test' in sys.argv or '--debug' in sys.argv:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         print(json.dumps(result, ensure_ascii=False))
