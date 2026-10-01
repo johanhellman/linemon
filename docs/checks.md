@@ -96,6 +96,11 @@ These show whether name lookups fail together with the rest, or on their own.
 - **Still in progress:** an outage that hasn't ended when the data ends (or, on the web
   page, now) is reported as *ongoing*. It is counted up to that moment, classified like any
   other, and in the analyzer's CSV has an empty `end` and `ongoing` set to `yes`.
+- **When the monitor wasn't running:** that time is unknown, never counted as up. A run
+  that ends with a `stop` row ended there. A run that is followed by a `start` with no `stop`
+  (a crash or power cut) is taken to have ended when it was last seen: its last event or
+  the end of its last `minute.csv` row, whichever is later. Outages still open then end
+  there too, so the gap isn't counted as downtime either.
 - **Cadence:** each target is probed every second. A probe that times out takes about a
   second itself, so during outages the cadence is about 1.1 seconds.
 
