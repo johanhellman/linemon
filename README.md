@@ -37,7 +37,8 @@ The exact checks are in **[docs/checks.md](docs/checks.md)**.
 ## Requirements
 
 - Linux with systemd. Tested on a Raspberry Pi 4 with Raspberry Pi OS (Debian 12 Bookworm).
-- Python 3.9 or later, and `ping` from iputils (both included in Raspberry Pi OS).
+- Python 3.11 or later (tested in CI on 3.11, as shipped with Raspberry Pi OS Bookworm, and
+  3.13), and `ping` from iputils (both included in Raspberry Pi OS).
 - A **wired** connection to the ISP router. The monitor only uses that port (`eth0` by
   default), even if Wi-Fi is also connected. Turning Wi-Fi off removes any doubt:
   `sudo nmcli radio wifi off`.
