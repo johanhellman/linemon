@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Measurement data and exports stay out of the repo
+linemon-data/
+*.csv
