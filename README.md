@@ -196,9 +196,16 @@ anything.
 python3 /opt/linemon/analyze.py /var/lib/linemon
 ```
 
-This prints the outages per target, the internet outages grouped by where the path
-broke and per day, and the longest ones. Add `--csv outages.csv` to export the internet
-outages, or `--all` to include data from before the last router change.
+This prints the outages per target, the availability, MTBF and MTTR for this month, the
+internet outages grouped by where the path broke and per day, and the longest ones. Add
+`--csv outages.csv` to export the internet outages, or `--all` to include data from before
+the last router change.
+
+Availability and the other figures cover only the time linemon was observing, and say how
+much of the period is unknown (the monitor wasn't running, or its own cable was down), so
+they hold up when you show them to your ISP. Choose another period with
+`--from 2026-09-01 --to 2026-10-01`. The definitions are in
+[docs/checks.md](docs/checks.md#availability-mtbf-and-mttr).
 
 ### Comparing with a UniFi gateway
 

@@ -9,6 +9,9 @@ An internet outage is a period where all of 1.1.1.1, 8.8.8.8 and 9.9.9.9 were
 down at once. Each one is classified by the first layer that also failed:
 link (cable), gateway (ISP router), isp_hop1, isp_hop2, or beyond.
 
+Availability, MTBF and MTTR are worked out over the time the monitor was actually
+observing (default: this month); time it wasn't running is reported as unknown.
+
 If the monitor runs with a router capture hook, each outage also gets what the
 router itself reported during it, and the router's reported connection uptime
 shows every time its internet session was (re)established.
@@ -381,6 +384,166 @@ def load_udm(paths, window_start, window_end):
     return result
 
 
+# ---- availability, MTBF and MTTR (definitions: docs/checks.md#availability-mtbf-and-mttr) ----
+
+LOW_CONFIDENCE = 0.01  # more than this share of the period unknown
+
+
+def _clip(intervals, lo, hi):
+    return [(max(s, lo), min(e, hi)) for s, e in intervals if min(e, hi) > max(s, lo)]
+
+
+def _total(intervals):
+    return sum((e - s).total_seconds() for s, e in intervals)
+
+
+def _subtract(intervals, cuts):
+    """`intervals` with the time covered by `cuts` taken out."""
+    out = []
+    for s, e in intervals:
+        parts = [(s, e)]
+        for cs, ce in cuts:
+            nxt = []
+            for ps, pe in parts:
+                if ce <= ps or cs >= pe:
+                    nxt.append((ps, pe))
+                    continue
+                if cs > ps:
+                    nxt.append((ps, cs))
+                if ce < pe:
+                    nxt.append((ce, pe))
+            parts = nxt
+        out += parts
+    return out
+
+
+def _intersect(a, b):
+    out = []
+    for s1, e1 in a:
+        for s2, e2 in b:
+            s, e = max(s1, s2), min(e1, e2)
+            if e > s:
+                out.append((s, e))
+    return out
+
+
+def monitored_minutes(data_dir, lo, hi):
+    """The time in [lo, hi) the monitor was running, as intervals: the minutes that have a
+    'link' row in minute.csv (written for every minute the monitor ran, whether the cable
+    was up or not). None if there is no minute.csv to go by."""
+    try:
+        f = open(os.path.join(data_dir, 'minute.csv'), 'rb')
+    except FileNotFoundError:
+        return None
+    minutes = []
+    with f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(_minute_offset(f, size, lo - dt.timedelta(minutes=1)))
+        for raw in f:
+            parts = raw.split(b',', 2)
+            if len(parts) < 3 or parts[1] != b'link':
+                continue
+            try:
+                minute = parse_time(parts[0].decode(errors='replace'))
+            except ValueError:
+                continue  # the header, or a line cut short
+            if minute >= hi:
+                break
+            minutes.append(minute)
+    intervals = []
+    for minute in sorted(set(minutes)):
+        end = minute + dt.timedelta(minutes=1)
+        if intervals and intervals[-1][1] == minute:
+            intervals[-1] = (intervals[-1][0], end)
+        else:
+            intervals.append((minute, end))
+    return _clip(intervals, lo, hi)
+
+
+def availability(data_dir, lo, hi, now, include_all=False):
+    """Availability, MTBF and MTTR of the internet for [lo, hi), over observed time only.
+
+    Observed time is when the monitor was running and its own cable was up; the rest of
+    the period is unknown, never counted as up. An internet outage is all three hosts
+    down at once. Returns None if there is no monitoring data.
+    """
+    outages, periods = load_outages(data_dir, include_all)
+    if not periods:
+        return None
+    data_end = periods[-1][1]
+    hi = min(hi, now)
+    if hi <= lo:
+        return None
+    open_end = min(hi, data_end)  # what is down at the end of the data is counted up to there
+    monitored = monitored_minutes(data_dir, lo, hi)
+    if monitored is None:
+        monitored = _clip([(s, e or data_end) for s, e in periods], lo, hi)
+    link_down = [(s, e or open_end) for s, e, _ in outages.get('link', [])]
+    observed = _subtract(monitored, link_down)
+
+    period = (hi - lo).total_seconds()
+    downtime, completed, count, ongoing = 0.0, [], 0, 0
+    for s, e, is_ongoing in intersect_all([outages.get(h, []) for h in INTERNET_HOSTS], open_end=open_end):
+        pieces = _subtract([(s, e)], link_down)  # time the monitor's own cable was down says nothing about the line
+        downtime += _total(_intersect(_clip(pieces, lo, hi), observed))
+        if lo <= s < hi and pieces:  # an outage belongs to the period it started in
+            count += 1
+            if is_ongoing:
+                ongoing += 1
+            else:
+                completed.append(_total(pieces))
+    seen = _total(observed)
+    up = seen - downtime
+    result = {
+        'from': lo, 'to': hi, 'period_s': period, 'monitored_s': _total(monitored), 'observed_s': seen,
+        'unknown_s': period - seen, 'downtime_s': downtime, 'outages': count, 'ongoing': ongoing,
+        'completed': len(completed),
+        'availability': up / seen if seen else None,
+        'mttr_s': sum(completed) / len(completed) if completed else None,
+        'mtbf_s': up / count if count else None,
+    }
+    result['low_confidence'] = (period - seen) / period > LOW_CONFIDENCE
+    return result
+
+
+def month_window(now):
+    """The calendar month `now` is in, in local time: (start, start of next month)."""
+    first = dt.datetime(now.year, now.month, 1)
+    nxt = dt.datetime(now.year + (now.month == 12), now.month % 12 + 1, 1)
+    return first.astimezone(), nxt.astimezone()
+
+
+def local_time(text):
+    """A date or time typed on the command line, read as local time unless it has an offset."""
+    t = parse_time(text)
+    return t if t.tzinfo else t.astimezone()
+
+
+def print_availability(a):
+    pct = lambda part: f'{100 * part / a["period_s"]:.2f} %'
+    print(f'\nAvailability, {a["from"]:%d/%m/%Y %H:%M} to {a["to"]:%d/%m/%Y %H:%M} ({fmt_dur(a["period_s"])}):')
+    print(f'  Observed (monitor running, its own cable up): {fmt_dur(a["observed_s"])}, {pct(a["observed_s"])} of the period')
+    print(f'  Unknown (monitor not running or its own cable down): {fmt_dur(a["unknown_s"])}, {pct(a["unknown_s"])}')
+    if not a['observed_s']:
+        print('  Nothing was observed in this period, so there are no figures.')
+        return
+    print(f'  Internet outages (3 s or more): {a["outages"]}'
+          + (f' ({a["ongoing"]} still in progress)' if a['ongoing'] else '') + f', {fmt_dur(a["downtime_s"])} down')
+    print(f'  Availability: {100 * a["availability"]:.4f} % of observed time')
+    if a['mttr_s'] is None:
+        print('  MTTR: no completed outages')
+    else:
+        left_out = a['outages'] - a['completed']
+        print(f'  MTTR: {fmt_dur(a["mttr_s"])} (mean of {a["completed"]} completed outage(s)'
+              + (f'; {left_out} still in progress left out' if left_out else '') + ')')
+    if a['mtbf_s'] is None:
+        print(f'  MTBF: no outages in {fmt_dur(a["observed_s"])} of observation')
+    else:
+        print(f'  MTBF: {fmt_dur(a["mtbf_s"])} (observed up time per outage)')
+    if a['low_confidence']:
+        print(f'  Low confidence: more than {100 * LOW_CONFIDENCE:.0f} % of the period is unknown.')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('data', help='linemon data directory (with events.csv)')
@@ -388,6 +551,10 @@ def main():
     p.add_argument('--tolerance', type=int, default=15, help='seconds of slack when matching UDM outages')
     p.add_argument('--csv', help='write internet outages to this CSV file')
     p.add_argument('--all', action='store_true', help='include data from before the last router change')
+    p.add_argument('--from', dest='from_', type=local_time, metavar='TIME',
+                   help='start of the availability period (default: the start of this month, local time)')
+    p.add_argument('--to', type=local_time, metavar='TIME',
+                   help='end of the availability period (default: the start of next month, or now if earlier)')
     args = p.parse_args()
 
     change = router_change(load_events(args.data))
@@ -419,6 +586,12 @@ def main():
     still = sum(1 for *_, ongoing in internet if ongoing)
     print(f'\nInternet outages (all three hosts down): {len(internet)}, {fmt_dur(total)} in total'
           + (f' ({still} still in progress at the end of the data)' if still else ''))
+
+    now = dt.datetime.now().astimezone()
+    month_start, month_end = month_window(now)
+    avail = availability(args.data, args.from_ or month_start, args.to or month_end, now, args.all)
+    if avail:
+        print_availability(avail)
 
     captures = captures_since(load_captures(args.data), first)
     rows = []
