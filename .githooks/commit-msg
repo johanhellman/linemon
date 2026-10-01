@@ -1,0 +1,26 @@
+#!/bin/sh
+# Reject commit messages that don't follow Conventional Commits.
+# Enable once per clone with: git config core.hooksPath .githooks
+# Also used by CI: .githooks/commit-msg <file with the message>
+
+subject=$(head -n 1 "$1")
+case "$subject" in
+    Merge\ *|fixup!\ *|squash!\ *|amend!\ *) exit 0 ;;
+esac
+
+types='feat|fix|docs|test|refactor|perf|style|build|ci|chore|revert'
+if printf '%s\n' "$subject" | grep -Eq "^($types)(\([a-z0-9_./-]+\))?!?: [^ ].*"; then
+    exit 0
+fi
+
+cat >&2 <<EOF
+Commit message does not follow Conventional Commits:
+  $subject
+
+Use: type(scope): description
+  types: feat, fix, docs, test, refactor, perf, style, build, ci, chore, revert
+  e.g.   fix(zte_livebox): log out with the latest session token
+         docs: explain the router capture hook
+See CONTRIBUTING.md.
+EOF
+exit 1

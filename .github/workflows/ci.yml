@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.13']  # 3.11 is what Raspberry Pi OS Bookworm ships
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover tests -v
+
+  commit-messages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check commit messages follow Conventional Commits
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            commits=$(git rev-list --no-merges "$PR_BASE..$PR_HEAD")
+          elif git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            commits=$(git rev-list --no-merges "$BEFORE..$GITHUB_SHA")
+          else
+            # new branch or rewritten history: check the latest commits
+            commits=$(git rev-list --no-merges -n 20 "$GITHUB_SHA")
+          fi
+          status=0
+          for sha in $commits; do
+            git log -1 --format=%B "$sha" > "$RUNNER_TEMP/msg"
+            sh .githooks/commit-msg "$RUNNER_TEMP/msg" || status=1
+          done
+          exit $status
