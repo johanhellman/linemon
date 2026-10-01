@@ -14,6 +14,7 @@ router itself reported during it, and the router's reported connection uptime
 shows every time its internet session was (re)established.
 """
 import argparse
+import bisect
 import csv
 import datetime as dt
 import io
@@ -22,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from collections import defaultdict
 
 INTERNET_HOSTS = ['1.1.1.1', '8.8.8.8', '9.9.9.9']
@@ -47,21 +49,58 @@ def fmt_dur(seconds):
     return f'{h} h {m} min {s} s' if h else f'{m} min {s} s'
 
 
-def load_captures(data_dir):
-    """Router captures from captures.jsonl, oldest first, with 'time' parsed."""
+_captures_cache = {}  # path -> {'ino', 'offset', 'items'}; guarded by _captures_lock
+_captures_lock = threading.Lock()
+
+
+def _parse_captures(data):
     captures = []
+    for line in data.splitlines():
+        try:
+            c = json.loads(line)
+            c['time'] = parse_time(c['time'])
+            captures.append(c)
+        except (ValueError, KeyError, TypeError):
+            continue  # e.g. a line cut short by a power cut
+    return captures
+
+
+def load_captures(data_dir):
+    """Router captures from captures.jsonl, oldest first, with 'time' parsed.
+
+    The web page asks every few seconds and the file only grows at the end, so the
+    parsed captures are kept and only the new complete lines are parsed. The file is
+    expected to be appended to or replaced by a new file (as trim.py does); the cache is
+    dropped if it is replaced or gets shorter. Rewriting it in place at the same size
+    isn't noticed. The result is a copy of the list; don't modify the capture dicts in it.
+    """
+    path = os.path.join(data_dir, 'captures.jsonl')
     try:
-        with open(os.path.join(data_dir, 'captures.jsonl')) as f:
-            for line in f:
-                try:
-                    c = json.loads(line)
-                    c['time'] = parse_time(c['time'])
-                    captures.append(c)
-                except (ValueError, KeyError, TypeError):
-                    continue  # e.g. a line cut short by a power cut
+        st = os.stat(path)
     except FileNotFoundError:
-        pass
-    return sorted(captures, key=lambda c: c['time'])
+        return []
+    with _captures_lock:
+        entry = _captures_cache.get(path)
+        if entry is None or entry['ino'] != st.st_ino or st.st_size < entry['offset']:
+            entry = _captures_cache[path] = {'ino': st.st_ino, 'offset': 0, 'items': []}
+        if st.st_size > entry['offset']:
+            with open(path, 'rb') as f:
+                f.seek(entry['offset'])
+                data = f.read(st.st_size - entry['offset'])
+            whole = data[:data.rfind(b'\n') + 1]  # a line still being written waits for its newline
+            new = _parse_captures(whole.decode(errors='replace'))
+            items = entry['items']
+            out_of_order = bool(new and items and min(c['time'] for c in new) < items[-1]['time'])
+            items.extend(new)
+            if out_of_order or any(a['time'] > b['time'] for a, b in zip(new, new[1:])):
+                items.sort(key=lambda c: c['time'])
+            entry['offset'] += len(whole)
+        return list(entry['items'])
+
+
+def captures_since(captures, since):
+    """The captures at or after `since`, from a list sorted by time."""
+    return captures[bisect.bisect_left(captures, since, key=lambda c: c['time']):]
 
 
 def session_starts(captures, tolerance=30):
@@ -83,9 +122,11 @@ def session_starts(captures, tolerance=30):
 
 
 def router_during(captures, start, end, slack=5):
-    """What the router reported in captures taken during an outage."""
+    """What the router reported in captures taken during an outage (`captures` sorted by time)."""
     lo, hi = start - dt.timedelta(seconds=slack), end + dt.timedelta(seconds=slack)
-    found = [c for c in captures if c.get('reason') in ('outage-start', 'outage-ongoing') and lo <= c['time'] <= hi]
+    first = bisect.bisect_left(captures, lo, key=lambda c: c['time'])
+    last = bisect.bisect_right(captures, hi, key=lambda c: c['time'])
+    found = [c for c in captures[first:last] if c.get('reason') in ('outage-start', 'outage-ongoing')]
     summaries = []
     for c in found:
         s = c.get('summary') or ('capture failed: ' + c['error'] if c.get('error') else '')
@@ -379,7 +420,7 @@ def main():
     print(f'\nInternet outages (all three hosts down): {len(internet)}, {fmt_dur(total)} in total'
           + (f' ({still} still in progress at the end of the data)' if still else ''))
 
-    captures = [c for c in load_captures(args.data) if first <= c['time']]
+    captures = captures_since(load_captures(args.data), first)
     rows = []
     by_layer = defaultdict(lambda: [0, 0.0])
     by_day = defaultdict(lambda: [0, 0.0])

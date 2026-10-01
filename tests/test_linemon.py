@@ -586,6 +586,88 @@ class CrashGap(unittest.TestCase):
         self.assertEqual(periods[0], (self.at(0), self.at(0)))  # never before it started
 
 
+class CapturesCache(unittest.TestCase):
+    """captures.jsonl is parsed once and only new lines after that (issue #29)."""
+
+    TZ = dt.timezone(dt.timedelta(hours=2))
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, 'captures.jsonl')
+
+    def line(self, minute, reason='periodic', summary=None):
+        t = dt.datetime(2026, 10, 1, 12, minute // 60, minute % 60, tzinfo=self.TZ)
+        return json.dumps({'time': t.isoformat(), 'reason': reason, 'ok': True,
+                           'summary': summary or f'ok {minute}', 'uptime_s': 1000 + minute}) + '\n'
+
+    def append(self, text):
+        with open(self.path, 'a') as f:
+            f.write(text)
+
+    def minutes(self):
+        return [c['summary'] for c in analyze.load_captures(self.tmp)]
+
+    def test_new_lines_are_picked_up(self):
+        self.assertEqual(analyze.load_captures(self.tmp), [])            # no file yet
+        self.append(self.line(1) + self.line(2))
+        self.assertEqual(self.minutes(), ['ok 1', 'ok 2'])
+        self.append(self.line(3))
+        self.assertEqual(self.minutes(), ['ok 1', 'ok 2', 'ok 3'])
+
+    def test_a_half_written_line_waits_for_its_newline(self):
+        self.append(self.line(1) + self.line(2)[:30])
+        self.assertEqual(self.minutes(), ['ok 1'])
+        self.append(self.line(2)[30:])
+        self.assertEqual(self.minutes(), ['ok 1', 'ok 2'])
+
+    def test_bad_lines_are_skipped_and_order_is_kept(self):
+        self.append(self.line(5) + 'not json\n' + '{"time": "garbage"}\n' + self.line(3))
+        self.assertEqual(self.minutes(), ['ok 3', 'ok 5'])
+        self.append(self.line(4))                                          # arrives late: still sorted
+        self.assertEqual(self.minutes(), ['ok 3', 'ok 4', 'ok 5'])
+
+    def test_a_replaced_or_shortened_file_is_read_again(self):
+        self.append(self.line(1) + self.line(2) + self.line(3))
+        self.assertEqual(len(analyze.load_captures(self.tmp)), 3)
+        replacement = self.path + '.new'                                   # as trim.py does: write, then swap
+        with open(replacement, 'w') as f:
+            f.write(self.line(3))
+        os.replace(replacement, self.path)
+        self.assertEqual(self.minutes(), ['ok 3'])
+        with open(self.path, 'w'):                                         # emptied in place
+            pass
+        self.assertEqual(self.minutes(), [])
+        self.append(self.line(9))
+        self.assertEqual(self.minutes(), ['ok 9'])
+
+    def test_the_caller_cannot_corrupt_the_cache(self):
+        self.append(self.line(1) + self.line(2))
+        analyze.load_captures(self.tmp).clear()
+        self.assertEqual(self.minutes(), ['ok 1', 'ok 2'])
+
+    def test_router_during_matches_a_linear_scan(self):
+        lines = ''.join(self.line(m, reason=('outage-start' if m % 7 == 0 else 'periodic'), summary=f'summary {m // 7}')
+                        for m in range(0, 180))
+        self.append(lines)
+        captures = analyze.load_captures(self.tmp)
+
+        def linear(start, end, slack=5):
+            lo, hi = start - dt.timedelta(seconds=slack), end + dt.timedelta(seconds=slack)
+            out = []
+            for c in captures:
+                if c['reason'] in ('outage-start', 'outage-ongoing') and lo <= c['time'] <= hi and c['summary'] not in out:
+                    out.append(c['summary'])
+            return '; '.join(out)
+        base = dt.datetime(2026, 10, 1, 12, 0, tzinfo=self.TZ)
+        for start_min, length_min in ((0, 1), (6, 2), (13, 30), (50, 0), (170, 20), (400, 5)):
+            s, e = base + dt.timedelta(minutes=start_min), base + dt.timedelta(minutes=start_min + length_min)
+            self.assertEqual(analyze.router_during(captures, s, e), linear(s, e), (start_min, length_min))
+        since = base + dt.timedelta(minutes=100)
+        self.assertEqual([c['summary'] for c in analyze.captures_since(captures, since)],
+                         [c['summary'] for c in captures if c['time'] >= since])
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()
