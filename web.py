@@ -80,6 +80,17 @@ def with_down_durations(events, now):
     return rows
 
 
+_sessions_memo = {}
+
+
+def sessions(data_dir, since, captures):
+    """analyze.session_starts, kept until a new capture arrives (they come every few minutes)."""
+    key = (data_dir, since, len(captures), captures[-1]['time'] if captures else None)
+    if _sessions_memo.get('key') != key:
+        _sessions_memo.update(key=key, value=analyze.session_starts(captures))
+    return _sessions_memo['value']
+
+
 def status(data_dir):
     now = dt.datetime.now().astimezone()
     events = analyze.load_events(data_dir)
@@ -101,7 +112,7 @@ def status(data_dir):
 
     since = periods[0][0] if periods else None
     stale = bool(last_data and (now - last_data).total_seconds() > 180)
-    captures = [c for c in analyze.load_captures(data_dir) if since and c['time'] >= since]
+    captures = analyze.captures_since(analyze.load_captures(data_dir), since) if since else []
     # Outages still in progress run until now, or until the last data if the monitor has stopped.
     open_end = last_data if stale else now
     internet = analyze.intersect_all([outages.get(h, []) for h in analyze.INTERNET_HOSTS], open_end=open_end)
@@ -123,7 +134,7 @@ def status(data_dir):
             'time': iso(latest['time']), 'reason': latest.get('reason'), 'ok': latest.get('ok'),
             'summary': latest.get('summary'), 'error': latest.get('error'),
             'sessions': [{'start': iso(s['start']), 'last_seen': iso(s['last_seen'])}
-                         for s in reversed(analyze.session_starts(captures))][:20],
+                         for s in reversed(sessions(data_dir, since, captures))][:20],
         }
     return {
         'router_status': router_status,
