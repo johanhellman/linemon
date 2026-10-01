@@ -4,7 +4,9 @@ Wants=network-online.target time-sync.target
 After=network-online.target time-sync.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/linemon/linemon.py --iface eth0 --data /var/lib/linemon
+# Optional extra arguments, e.g. LINEMON_ARGS="--hook /opt/linemon/routers/zte_livebox.py"
+EnvironmentFile=-/etc/default/linemon
+ExecStart=/usr/bin/python3 /opt/linemon/linemon.py --iface eth0 --data /var/lib/linemon $LINEMON_ARGS
 Restart=always
 RestartSec=5
 

@@ -75,6 +75,67 @@ To upgrade, pull and run `sudo ./install.sh` again. The monitor is only restarte
 `linemon.py` changed, so upgrading the page or the analyzer doesn't interrupt the
 measurements.
 
+## Capturing the router's own status
+
+Optionally, linemon can also record what the ISP router itself reports, using a
+capture script for your router model. It runs when all internet hosts go down, every
+30 seconds while they stay down, once when they come back, and every 5 minutes
+otherwise. The result appears next to each outage ("Router said") on the web page and
+in the analyzer, and the raw responses from outages are kept as evidence.
+
+The periodic captures also record the router's **connection uptime**, so linemon can
+list every time the internet session was re-established, even when an outage was too
+short to catch during it.
+
+Included: **`routers/zte_livebox.py`** for the ZTE-made Livebox 6s (ZXHN F6640P) used by
+Orange, MasOrange and Pepephone in Spain. It reports the fibre's GPON state (O5 =
+operational), loss of signal, whether the router has an internet address, and the
+connection uptime.
+
+Set it up on the monitor:
+
+1. Store the router's admin login in a file only root can read:
+
+   ```bash
+   sudo install -d -m 700 /etc/linemon
+   sudo nano /etc/linemon/router.conf
+   ```
+
+   ```ini
+   [router]
+   host = 192.168.1.1
+   username = admin
+   password = <the router's admin password>
+   ```
+
+   ```bash
+   sudo chmod 600 /etc/linemon/router.conf
+   ```
+
+2. Test it. It should print `"ok": true` and a summary like
+   `fibre O5 operational · signal OK · internet up`:
+
+   ```bash
+   sudo /opt/linemon/routers/zte_livebox.py --test
+   ```
+
+3. Turn it on and restart the monitor:
+
+   ```bash
+   echo 'LINEMON_ARGS="--hook /opt/linemon/routers/zte_livebox.py"' | sudo tee /etc/default/linemon
+   sudo systemctl restart linemon
+   ```
+
+Results go to `/var/lib/linemon/captures.jsonl`, and raw responses to
+`/var/lib/linemon/captures/`. After a failed login the script waits 30 minutes before
+trying again, so a wrong password can't get the router's admin account locked. The
+script logs in and out for every capture; if the router allows only one admin session,
+you may occasionally be logged out of its web page while a capture runs.
+
+To support another router, write a script that prints one JSON object such as
+`{"ok": false, "summary": "...", "uptime_s": 120}`; the details are in
+[docs/checks.md](docs/checks.md#router-captures).
+
 ## Web page
 
 Open `http://<monitor-address>:8080`. It refreshes every 10 seconds and shows:
@@ -124,15 +185,26 @@ Everything is in `/var/lib/linemon`:
 | `events.csv` | One row per down/up transition per target, plus monitor start/stop and router changes |
 | `minute.csv` | Per target and minute: probes sent, lost, average and max round-trip time |
 | `path.log` | The discovered path, NTP sync and power status, at start, after a router change, and hourly |
+| `captures.jsonl` | The router's own status, if a router capture is set up |
+| `captures/` | Raw router responses from captures taken around outages |
 
 The formats are described in [docs/checks.md](docs/checks.md#data-files).
+
+## Tests
+
+```bash
+python3 -m unittest discover tests
+```
+
+The tests use sanitised copies of real router responses and a fake router that
+implements the Livebox login, so they need no network or credentials.
 
 ## Uninstall
 
 ```bash
 sudo systemctl disable --now linemon linemon-web
 sudo rm /etc/systemd/system/linemon.service /etc/systemd/system/linemon-web.service
-sudo rm -r /opt/linemon            # add /var/lib/linemon to also delete the data
+sudo rm -rf /opt/linemon /etc/linemon /etc/default/linemon   # add /var/lib/linemon to also delete the data
 sudo systemctl daemon-reload
 ```
 

@@ -17,15 +17,26 @@ outage survives a crash or power cut. Output in --data:
   events.csv   one row per down/up transition, plus monitor start/stop
   minute.csv   per target and minute: probes sent, lost, average and max RTT
   path.log     discovered hops, NTP sync and power status (start and hourly)
+  captures.jsonl  output of the --hook command, if one is set (see below)
+
+With --hook, a command (e.g. routers/zte_livebox.py) is run to capture what the
+ISP router itself reports: when all internet hosts go down (outage-start), every
+--hook-during seconds while they stay down (outage-ongoing), once when they
+come back (outage-end), and every --hook-interval seconds otherwise (periodic).
+It gets LINEMON_REASON, LINEMON_TIME, LINEMON_DATA and LINEMON_CAPTURE_DIR (a
+fresh directory for raw files) in its environment and must print one JSON
+object on its last line of output, ideally with "ok", "summary" and "uptime_s".
 
 Needs root (or CAP_NET_RAW) to bind probes to --iface.
 """
 import argparse
 import csv
 import datetime as dt
+import json
 import os
 import random
 import re
+import shlex
 import signal
 import socket
 import struct
@@ -123,6 +134,7 @@ class Monitor:
         self.gateway = default_gateway(self.iface)
         self.hops = {}  # 'isp_hop1' -> (ttl, responder)
         self.stats = {}  # (minute, target) -> [sent, lost, rtt_sum, rtt_n, rtt_max]
+        self.down = {}  # target -> currently declared down
         os.makedirs(args.data, exist_ok=True)
         self.events_f, self.events = self._open_csv('events.csv', ['time', 'target', 'event', 'duration_s', 'detail'])
         self.minute_f, self.minute = self._open_csv(
@@ -164,6 +176,59 @@ class Monitor:
                 mx = f'{rtt_max:.1f}' if rtt_n else ''
                 self.minute.writerow([key[0], key[1], sent, lost, avg, mx])
             self.minute_f.flush()
+
+    def run_hook(self, reason):
+        """Run --hook and append its JSON result to captures.jsonl."""
+        t = now()
+        capture_dir = os.path.join(self.args.data, 'captures', f"{t:%Y%m%dT%H%M%S}-{reason}")
+        os.makedirs(capture_dir, exist_ok=True)
+        env = dict(os.environ, LINEMON_REASON=reason, LINEMON_TIME=iso(t),
+                   LINEMON_DATA=self.args.data, LINEMON_CAPTURE_DIR=capture_dir)
+        out = ''
+        try:
+            r = subprocess.run(shlex.split(self.args.hook), capture_output=True, text=True,
+                               timeout=self.args.hook_timeout, env=env)
+            out = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ''
+            result = json.loads(out) if out else {
+                'error': f'no output (exit {r.returncode}) {r.stderr.strip()[-200:]}'}
+            if not isinstance(result, dict):
+                result = {'error': f'expected a JSON object, got: {out[:200]}'}
+        except subprocess.TimeoutExpired:
+            result = {'error': f'timed out after {self.args.hook_timeout} s'}
+        except json.JSONDecodeError:
+            result = {'error': f'output is not JSON: {out[:200]}'}
+        except Exception as e:
+            result = {'error': str(e)}
+        if os.listdir(capture_dir):
+            result['files'] = os.path.relpath(capture_dir, self.args.data)
+        else:
+            os.rmdir(capture_dir)
+        line = json.dumps({'time': iso(t), 'reason': reason, **result}, ensure_ascii=False)
+        with self.lock, open(os.path.join(self.args.data, 'captures.jsonl'), 'a') as f:
+            f.write(line + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+
+    def hook_loop(self):
+        """Capture the router's own status around internet outages, and periodically."""
+        was_down = False
+        last_run = time.monotonic()  # the first periodic capture comes one interval after start
+        while not self.stop.wait(1):
+            down = all(self.down.get(h) for h in INTERNET_HOSTS)
+            elapsed = time.monotonic() - last_run
+            if down and not was_down:
+                reason = 'outage-start'
+            elif down and elapsed >= self.args.hook_during:
+                reason = 'outage-ongoing'
+            elif was_down and not down:
+                reason = 'outage-end'
+            elif not down and self.args.hook_interval and elapsed >= self.args.hook_interval:
+                reason = 'periodic'
+            else:
+                continue
+            was_down = down
+            self.run_hook(reason)
+            last_run = time.monotonic()
 
     def discover_hops(self):
         """Find the first two routers beyond the gateway that answer TTL-limited probes."""
@@ -244,6 +309,7 @@ class Monitor:
                 if fails == self.args.threshold:
                     down = True
                     self.event(first_fail, name, 'down', '', last_ok)
+            self.down[name] = down
 
     def maintenance(self):
         last_path = time.monotonic()
@@ -271,6 +337,8 @@ class Monitor:
         threads = [threading.Thread(target=self.run_target, args=(n, p), daemon=True)
                    for n, p in self.probes().items()]
         threads.append(threading.Thread(target=self.maintenance, daemon=True))
+        if self.args.hook:
+            threads.append(threading.Thread(target=self.hook_loop, daemon=True))
         for th in threads:
             th.start()
         self.stop.wait()
@@ -286,6 +354,11 @@ def main():
     p.add_argument('--data', default='/var/lib/linemon', help='output directory')
     p.add_argument('--interval', type=float, default=1.0, help='seconds between probes per target')
     p.add_argument('--threshold', type=int, default=3, help='consecutive failures before a target is down')
+    p.add_argument('--hook', help='command that captures the ISP router\'s own status (see above)')
+    p.add_argument('--hook-during', type=int, default=30, help='seconds between captures during an outage')
+    p.add_argument('--hook-interval', type=int, default=300,
+                   help='seconds between periodic captures when the line is up (0 = only around outages)')
+    p.add_argument('--hook-timeout', type=int, default=30, help='seconds before a capture is abandoned')
     args = p.parse_args()
 
     mon = Monitor(args)

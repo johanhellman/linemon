@@ -12,12 +12,15 @@ cd "$(dirname "$0")"
 # monitor itself changed (or isn't running) - upgrading the web page or the
 # analyzer then doesn't interrupt the measurements.
 restart_monitor=yes
-if cmp -s linemon.py /opt/linemon/linemon.py && systemctl is-active -q linemon; then
+if cmp -s linemon.py /opt/linemon/linemon.py \
+    && cmp -s linemon.service /etc/systemd/system/linemon.service \
+    && systemctl is-active -q linemon; then
     restart_monitor=no
 fi
 
-install -d /opt/linemon /var/lib/linemon
+install -d /opt/linemon /opt/linemon/routers /var/lib/linemon
 install -m 755 linemon.py analyze.py web.py /opt/linemon/
+install -m 755 routers/*.py /opt/linemon/routers/
 install -m 644 linemon.service linemon-web.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q linemon linemon-web
@@ -31,3 +34,8 @@ echo "Monitor:  $(systemctl is-active linemon)$([ "$restart_monitor" = no ] && e
 echo "Web page: $(systemctl is-active linemon-web) at http://${address:-<pi-address>}:8080"
 echo "NTP synchronised: $(timedatectl show -p NTPSynchronized --value)"
 echo "Router on eth0 right now: $(ip -4 route show default dev eth0 | awk '/default/ {print $3; exit}')"
+if grep -qs -- '--hook' /etc/default/linemon; then
+    echo "Router capture: on ($(grep -o -- '--hook [^ "]*' /etc/default/linemon))"
+else
+    echo "Router capture: off (see 'Capturing the router's own status' in the README)"
+fi

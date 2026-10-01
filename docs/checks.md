@@ -110,6 +110,85 @@ that was also down at any point during that period:
 | second ISP hop unreachable | The first operator router answered but the second didn't. |
 | beyond the ISP hops | The router and both hops answered, but the internet hosts didn't: further into the operator's network or beyond. |
 
+## Router captures
+
+The probes show *where* the path broke from the outside. A router capture adds what the
+ISP router *itself* says, which is often what an ISP will accept as proof.
+
+### When captures run
+
+With `--hook <command>`, a separate thread checks once a second whether all three
+internet hosts are down, and runs the command:
+
+| Reason | When |
+|---|---|
+| `outage-start` | As soon as all three internet hosts are down (about 3 s into an outage) |
+| `outage-ongoing` | Every `--hook-during` seconds (default 30) while they stay down |
+| `outage-end` | Once when they come back |
+| `periodic` | Every `--hook-interval` seconds (default 300) while the line is up. `0` turns this off. |
+
+Captures run one at a time. A capture that takes longer than `--hook-timeout` (default
+30 s) is abandoned and logged as an error.
+
+### The hook contract
+
+The command gets these environment variables:
+
+| Variable | Contents |
+|---|---|
+| `LINEMON_REASON` | One of the reasons above |
+| `LINEMON_TIME` | When the capture started (ISO 8601) |
+| `LINEMON_DATA` | The data directory |
+| `LINEMON_CAPTURE_DIR` | A fresh, empty directory for raw files. It is removed if left empty. |
+
+It must print one JSON object on its last line of output. linemon understands:
+
+| Key | Meaning |
+|---|---|
+| `ok` | `true` if the router reports everything healthy |
+| `summary` | One line for people, shown as "Router said" |
+| `uptime_s` | Seconds since the router's internet connection was established, if it has one |
+| `error` | Set instead of the above when the capture failed |
+
+Anything else (e.g. `details`) is stored as is. linemon adds `time`, `reason` and,
+if raw files were saved, `files`, and appends the line to `captures.jsonl`.
+
+### Session starts
+
+Each capture with `uptime_s` dates when the router's current internet session began:
+capture time minus uptime. Captures that agree within 30 seconds belong to the same
+session; a new start time means the session was dropped and re-established. Periodic
+captures every 5 minutes are enough to catch every reconnection, including ones
+during outages too short to capture while they last.
+
+### ZTE Livebox 6s (`routers/zte_livebox.py`)
+
+For the ZTE-made Livebox 6s (ZXHN F6640P) used in Spain. It does what the router's own
+web pages do:
+
+1. **Log in.** `GET /?_type=loginData&_tag=login_entry` returns a session token;
+   `GET /?_type=loginData&_tag=login_token` returns a one-time token; then
+   `POST /?_type=loginData&_tag=login_entry` with `action=login`, `Username`,
+   `Password = sha256(password + one-time token)` and the session token. The password
+   itself is never sent.
+2. **Read** `/?_type=menuData&_tag=osp_led_status_orange_lua.lua` (the LED page) and
+   `/?_type=menuData&_tag=wan_internetstatus_lua.lua&TypeUplink=2&pageType=1`
+   (the internet connection).
+3. **Log out** with `POST /?_type=loginData&_tag=logout_entry`.
+
+From the responses it reports:
+
+| Field | Source | Meaning |
+|---|---|---|
+| GPON state | `RegStatus` | The fibre registration state from ITU-T G.984.3: 5 = O5 operational; 1–4 = not (yet) registered; 6–7 = fault states |
+| Signal | `LosInfo` | Loss of optical signal: anything but 0 means the fibre is not receiving light |
+| Internet | `ConnStatus`, `IPAddress`, `ConnError` | Whether the internet connection (VLAN 20 on this ISP) is connected and has an address |
+| Uptime | `UpTime` | Seconds since the internet connection was established |
+
+`ok` is true only when the fibre is operational, there is no loss of signal and the
+router has an address. The raw XML responses are saved for outage captures, not for
+periodic ones. After a rejected login it does not try again for 30 minutes.
+
 ## Data files
 
 All in `/var/lib/linemon`. Times are ISO 8601 in local time with the UTC offset, e.g.
@@ -136,6 +215,18 @@ reply carries no round-trip time in `ping`'s output) and the cable check.
 One line at start, after each router change, and hourly: the router, the discovered
 hops (`isp_hop1=ttl4:10.20.30.1`), whether NTP is synchronised, and on a Raspberry Pi
 the `vcgencmd get_throttled` value (`0x0` means the power supply has been fine).
+
+### `captures.jsonl`
+
+One JSON object per line, as described under [the hook contract](#the-hook-contract),
+for example:
+
+```json
+{"time": "2026-10-01T17:06:04.120+02:00", "reason": "outage-start", "ok": false,
+ "summary": "fibre O5 operational · signal OK · no IP", "uptime_s": null,
+ "details": {"gpon_state": 5, "los": false, "conn_status": "Connecting", ...},
+ "files": "captures/20261001T170604-outage-start"}
+```
 
 ## Limitations
 

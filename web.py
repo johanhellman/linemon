@@ -102,11 +102,14 @@ def status(data_dir):
             'downtime_s': round(sum((e - s).total_seconds() for s, e in closed)),
         })
 
+    since = periods[0][0] if periods else None
+    captures = [c for c in analyze.load_captures(data_dir) if since and c['time'] >= since]
     internet = analyze.intersect_all([outages.get(h, []) for h in analyze.INTERNET_HOSTS])
     internet_rows = []
     for s, e in reversed(internet):
         internet_rows.append({'start': iso(s), 'end': iso(e), 'duration_s': round((e - s).total_seconds()),
-                              'layer': analyze.classify(s, e, outages)})
+                              'layer': analyze.classify(s, e, outages),
+                              'router': analyze.router_during(captures, s, e)})
     day_ago = now - dt.timedelta(hours=24)
     last_day = [r for r in internet_rows if analyze.parse_time(r['start']) >= day_ago]
 
@@ -115,7 +118,17 @@ def status(data_dir):
                            if len(hosts_down) == len(analyze.INTERNET_HOSTS) else None)
 
     recent = list(reversed(with_down_durations(events, now)))[:60]
+    router_status = None
+    if captures:
+        latest = captures[-1]
+        router_status = {
+            'time': iso(latest['time']), 'reason': latest.get('reason'), 'ok': latest.get('ok'),
+            'summary': latest.get('summary'), 'error': latest.get('error'),
+            'sessions': [{'start': iso(s['start']), 'last_seen': iso(s['last_seen'])}
+                         for s in reversed(analyze.session_starts(captures))][:20],
+        }
     return {
+        'router_status': router_status,
         'now': iso(now),
         'monitoring_since': iso(periods[0][0]) if periods else None,
         'router': change['detail'].split('->')[-1].strip() if change else None,
@@ -166,6 +179,8 @@ h1 { font-size:20px; margin:4px 0 2px } h2 { font-size:15px; margin:0 0 10px }
 table { width:100%; border-collapse:collapse } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line) }
 th { color:var(--muted); font-weight:500; font-size:12px } td.num { text-align:right; font-variant-numeric:tabular-nums }
 td.nw { white-space:nowrap } tr.ongoing td { color:var(--bad); font-weight:600 }
+.pill { display:inline-block; padding:1px 9px; border-radius:999px; font-size:12px; font-weight:600 }
+[hidden] { display:none !important }
 .scroll { max-height:420px; overflow:auto }
 canvas { width:100%; height:150px; display:block }
 .legend span { margin-right:14px }
@@ -178,6 +193,16 @@ canvas { width:100%; height:150px; display:block }
   <div class="banner" id="banner">…</div>
 
   <div class="card"><h2>Internet outages</h2><div class="stats" id="stats"></div></div>
+
+  <div class="card" id="router-card" hidden>
+    <h2>What the router reports</h2>
+    <p><span class="pill" id="router-pill"></span> <span id="router-summary"></span></p>
+    <p class="small muted" id="router-meta"></p>
+    <h3 class="small" style="margin:14px 0 6px">Internet session (re)started at</h3>
+    <p class="small muted" style="margin:0 0 6px">Worked out from the connection uptime the router reports. A new
+      session means the operator's side dropped and re-established the connection.</p>
+    <div class="scroll" style="max-height:200px"><table><tbody id="sessions"></tbody></table></div>
+  </div>
 
   <div class="card">
     <h2>Lost probes, last 24 hours</h2>
@@ -192,7 +217,7 @@ canvas { width:100%; height:150px; display:block }
   <div class="card"><h2>Targets</h2><div class="grid" id="targets"></div></div>
 
   <div class="card"><h2>Internet outages, newest first</h2>
-    <div class="scroll"><table><thead><tr><th>Start</th><th>End</th><th class="num">Duration</th><th>Where it broke</th></tr></thead>
+    <div class="scroll"><table><thead><tr><th>Start</th><th>End</th><th class="num">Duration</th><th>Where it broke</th><th>Router said</th></tr></thead>
     <tbody id="outages"></tbody></table></div></div>
 
   <div class="card">
@@ -210,6 +235,10 @@ canvas { width:100%; height:150px; display:block }
       </tbody></table>
       <p class="small muted">"Where it broke" names the first layer that was also down during an internet outage.
         "Beyond the ISP hops" means the router and the first hops answered, but the internet hosts did not.</p>
+      <p class="small muted">"Router said" is the ISP router's own status, read from its admin pages when the
+        outage starts, every 30 s during it and every 5 minutes otherwise (only if a router capture is set up).
+        For fibre: the GPON state (O5 = operational), whether the optical signal is present, and whether the
+        router has an internet address.</p>
     </details>
   </div>
 
@@ -296,11 +325,27 @@ async function refresh() {
   const ob = document.createDocumentFragment();
   if (d.internet_down_since) {
     const tr = row([fmtTime(d.internet_down_since), 'ongoing',
-      fmtDur((Date.parse(d.now) - Date.parse(d.internet_down_since)) / 1000), 'in progress'], ['nw', 'nw', 'num nw', '']);
+      fmtDur((Date.parse(d.now) - Date.parse(d.internet_down_since)) / 1000), 'in progress',
+      d.router_status && d.router_status.reason !== 'periodic' ? (d.router_status.summary || d.router_status.error || '') : ''], ['nw', 'nw', 'num nw', '', '']);
     tr.className = 'ongoing'; ob.appendChild(tr);
   }
   if (!s.outages.length && !d.internet_down_since) ob.appendChild(row(['No internet outages yet.']));
-  s.outages.forEach(o => ob.appendChild(row([fmtTime(o.start), fmtTime(o.end), fmtDur(o.duration_s), o.layer], ['nw', 'nw', 'num nw', ''])));
+  s.outages.forEach(o => ob.appendChild(row([fmtTime(o.start), fmtTime(o.end), fmtDur(o.duration_s), o.layer, o.router],
+    ['nw', 'nw', 'num nw', '', ''])));
+
+  const rc = document.getElementById('router-card');
+  rc.hidden = !d.router_status;
+  if (d.router_status) {
+    const r = d.router_status, pill = document.getElementById('router-pill');
+    pill.textContent = r.error ? 'capture failed' : (r.ok ? 'OK' : 'PROBLEM');
+    pill.className = 'pill ' + (r.error ? 'warn' : (r.ok ? 'ok' : 'bad'));
+    document.getElementById('router-summary').textContent = r.error || r.summary || '';
+    document.getElementById('router-meta').textContent = `Last capture ${fmtTime(r.time)} (${r.reason})`;
+    const sb = document.createDocumentFragment();
+    if (!r.sessions.length) sb.appendChild(row(['No connection uptime reported yet.']));
+    r.sessions.forEach(x => sb.appendChild(row([fmtTime(x.start), 'last seen ' + fmtTime(x.last_seen)], ['nw', 'muted'])));
+    document.getElementById('sessions').replaceChildren(sb);
+  }
   document.getElementById('outages').replaceChildren(ob);
 
   const eb = document.createDocumentFragment();

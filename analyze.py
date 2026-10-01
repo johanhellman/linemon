@@ -8,10 +8,15 @@
 An internet outage is a period where all of 1.1.1.1, 8.8.8.8 and 9.9.9.9 were
 down at once. Each one is classified by the first layer that also failed:
 link (cable), gateway (ISP router), isp_hop1, isp_hop2, or beyond.
+
+If the monitor runs with a router capture hook, each outage also gets what the
+router itself reported during it, and the router's reported connection uptime
+shows every time its internet session was (re)established.
 """
 import argparse
 import csv
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -39,6 +44,53 @@ def fmt_dur(seconds):
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f'{h} h {m} min {s} s' if h else f'{m} min {s} s'
+
+
+def load_captures(data_dir):
+    """Router captures from captures.jsonl, oldest first, with 'time' parsed."""
+    captures = []
+    try:
+        with open(os.path.join(data_dir, 'captures.jsonl')) as f:
+            for line in f:
+                try:
+                    c = json.loads(line)
+                    c['time'] = parse_time(c['time'])
+                    captures.append(c)
+                except (ValueError, KeyError, TypeError):
+                    continue  # e.g. a line cut short by a power cut
+    except FileNotFoundError:
+        pass
+    return sorted(captures, key=lambda c: c['time'])
+
+
+def session_starts(captures, tolerance=30):
+    """When the router's internet session (re)started, from its reported uptime.
+
+    Every capture with uptime_s dates the current session's start (capture time
+    minus uptime). Starts within `tolerance` seconds are the same session.
+    """
+    sessions = []
+    for c in captures:
+        if c.get('uptime_s') is None:
+            continue
+        start = c['time'] - dt.timedelta(seconds=c['uptime_s'])
+        if sessions and abs((start - sessions[-1]['start']).total_seconds()) <= tolerance:
+            sessions[-1]['last_seen'] = c['time']
+        else:
+            sessions.append({'start': start, 'first_seen': c['time'], 'last_seen': c['time']})
+    return sessions
+
+
+def router_during(captures, start, end, slack=5):
+    """What the router reported in captures taken during an outage."""
+    lo, hi = start - dt.timedelta(seconds=slack), end + dt.timedelta(seconds=slack)
+    found = [c for c in captures if c.get('reason') in ('outage-start', 'outage-ongoing') and lo <= c['time'] <= hi]
+    summaries = []
+    for c in found:
+        s = c.get('summary') or ('capture failed: ' + c['error'] if c.get('error') else '')
+        if s and s not in summaries:
+            summaries.append(s)
+    return '; '.join(summaries)
 
 
 def last_minute_end(data_dir):
@@ -206,6 +258,7 @@ def main():
     total = sum((e - s).total_seconds() for s, e in internet)
     print(f'\nInternet outages (all three hosts down): {len(internet)}, {fmt_dur(total)} in total')
 
+    captures = [c for c in load_captures(args.data) if first <= c['time']]
     rows = []
     by_layer = defaultdict(lambda: [0, 0.0])
     by_day = defaultdict(lambda: [0, 0.0])
@@ -217,7 +270,8 @@ def main():
         by_day[s.strftime('%d/%m')][0] += 1
         by_day[s.strftime('%d/%m')][1] += secs
         rows.append({'start': s.isoformat(timespec='seconds'), 'end': e.isoformat(timespec='seconds'),
-                     'duration_s': round(secs), 'layer': layer, 'udm_match': ''})
+                     'duration_s': round(secs), 'layer': layer, 'router': router_during(captures, s, e),
+                     'udm_match': ''})
     if internet:
         print('\n  Where the path broke:')
         for layer, (n, secs) in sorted(by_layer.items(), key=lambda x: -x[1][0]):
@@ -228,6 +282,20 @@ def main():
         print('\n  Longest:')
         for r in sorted(rows, key=lambda r: -r['duration_s'])[:5]:
             print(f"    {r['start'][:19].replace('T', ' ')}  {fmt_dur(r['duration_s']):>14}  {r['layer']}")
+            if r['router']:
+                print(f"    {'':19}  {'':>14}  router said: {r['router']}")
+
+    if captures:
+        failed = [c for c in captures if c.get('error')]
+        during = [c for c in captures if c.get('reason') in ('outage-start', 'outage-ongoing')]
+        print(f'\nRouter captures: {len(captures)} ({len(during)} during outages, {len(failed)} failed)')
+        if failed:
+            print(f"  Last failure: {failed[-1]['time']:%d/%m %H:%M:%S}  {failed[-1]['error']}")
+        sessions = session_starts(captures)
+        if sessions:
+            print('  Internet session (re)started at, according to the router:')
+            for s in sessions:
+                print(f"    {s['start']:%d/%m %H:%M:%S}  (seen until {s['last_seen']:%d/%m %H:%M})")
 
     if args.udm:
         udm = load_udm(args.udm, first, last)
@@ -249,7 +317,7 @@ def main():
 
     if args.csv:
         with open(args.csv, 'w', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=['start', 'end', 'duration_s', 'layer', 'udm_match'])
+            w = csv.DictWriter(f, fieldnames=['start', 'end', 'duration_s', 'layer', 'router', 'udm_match'])
             w.writeheader()
             w.writerows(rows)
         print(f'\nWrote {len(rows)} outages to {args.csv}')
