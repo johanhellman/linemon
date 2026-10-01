@@ -142,6 +142,37 @@ The settings are `[monitor]` `iface`, `data`, `interval` and `threshold`, and `[
   `LINEMON_ARGS` and changes nothing.
 - A value in the file is read literally: `%` needs no escaping.
 
+## Availability, MTBF and MTTR
+
+`analyze.py` prints these for a period (`--from` and `--to`; by default this calendar month
+in local time, up to now). They are worked out over **observed time only**. Time linemon
+couldn't see is unknown, and is reported next to every figure, never counted as up.
+
+| Term | Meaning |
+|---|---|
+| Period | The time asked about, up to now at most |
+| Monitored | The minutes with a `link` row in `minute.csv`, i.e. when the monitor was running. If there is no `minute.csv`, the monitoring runs from `events.csv` are used. |
+| Observed | Monitored time minus the time the monitor's own cable was down (`link`), because nothing it measures then says anything about the line |
+| Unknown | Period minus observed: the monitor wasn't running, or its own cable was down |
+| Downtime | Internet outages (all three hosts down at once) that fall in observed time. An outage in progress counts up to the end of the data. |
+| Availability | (observed − downtime) ÷ observed |
+| MTTR | The mean length of the completed outages. Outages still in progress are left out, and the report says how many. |
+| MTBF | (observed − downtime) ÷ number of outages. With no outages it says so instead of giving a number. |
+
+- **Outages that cross the edge of the period** count their downtime inside the period, but are
+  counted (for MTTR and MTBF) in the period where they started.
+- **Only outages of 3 seconds or more** are recorded (see [From probes to
+  outages](#from-probes-to-outages)), so availability is an upper bound by a few seconds per
+  real outage.
+- **Low confidence.** If more than 1 % of the period is unknown, the report says so.
+- **Planned maintenance** can't be known to linemon, so nothing is excluded. Operators often
+  state availability per month at their own network edge, excluding planned work, so their
+  figure and this one can legitimately differ.
+- The crash and power-cut rule in [From probes to outages](#from-probes-to-outages) is what
+  keeps time with no monitor out of "monitored".
+
+The reasoning is in [docs/spikes/008-availability.md](spikes/008-availability.md).
+
 ## Router captures
 
 The probes show *where* the path broke from the outside. A router capture adds what the

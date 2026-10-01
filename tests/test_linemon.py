@@ -813,6 +813,118 @@ class InstallFiles(unittest.TestCase):
             self.assertIn(name, self.read('install.sh'))
 
 
+class Availability(unittest.TestCase):
+    """Availability, MTBF and MTTR over observed time only (issue #20, definitions from spike #8)."""
+
+    TZ = dt.timezone(dt.timedelta(hours=2))
+
+    def at(self, day=0, hour=0, minute=0):
+        return dt.datetime(2026, 8, 3, hour, minute, tzinfo=self.TZ) + dt.timedelta(days=day)  # a Monday, in the past
+
+    def data(self, events, minutes):
+        """events: [(time, target, event)]; minutes: [(from, to)] with a 'link' row for each minute."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        with open(os.path.join(tmp, 'events.csv'), 'w', newline='') as f:
+            f.write('time,target,event,duration_s,detail\r\n')
+            for t, target, kind in sorted(events, key=lambda e: e[0]):
+                f.write(f'{t.isoformat()},{target},{kind},,\r\n')
+        if minutes is not None:
+            with open(os.path.join(tmp, 'minute.csv'), 'w', newline='') as f:
+                f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\r\n')
+                for start, end in minutes:
+                    t = start
+                    while t < end:
+                        f.write(f'{t.isoformat()},link,60,0,,\r\n{t.isoformat()},gateway,60,0,1.0,2.0\r\n')
+                        t += dt.timedelta(minutes=1)
+        return tmp
+
+    def internet(self, start, end=None):
+        events = [(start, h, 'down') for h in analyze.INTERNET_HOSTS]
+        if end:
+            events += [(end, h, 'up') for h in analyze.INTERNET_HOSTS]
+        return events
+
+    def week(self):
+        """The synthetic week from spike #8: two outages, a cable pulled, a power cut, an outage in progress."""
+        events = [(self.at(), 'monitor', 'start')]
+        events += self.internet(self.at(0, 3), self.at(0, 3, 10))          # Mon 03:00, 10 min
+        events += self.internet(self.at(2, 9), self.at(2, 9, 30))          # Wed 09:00, 30 min
+        events += self.internet(self.at(3, 12), self.at(3, 12, 5))         # Thu 12:00: cable pulled for 5 min
+        events += [(self.at(3, 12), 'link', 'down'), (self.at(3, 12, 5), 'link', 'up')]
+        events += [(self.at(4, 18, 20), 'monitor', 'start')]               # Fri: power cut 18:00-18:20, no stop row
+        events += self.internet(self.at(6, 23))                            # Sun 23:00, still down at the end
+        minutes = [(self.at(), self.at(4, 18)), (self.at(4, 18, 20), self.at(6, 23, 59))]
+        return self.data(events, minutes)
+
+    def test_the_hand_calculated_week(self):
+        a = analyze.availability(self.week(), self.at(), self.at(6, 23, 59), now=self.at(7))
+        minutes = lambda seconds: round(seconds / 60, 4)
+        self.assertEqual(minutes(a['period_s']), 10079)
+        self.assertEqual(minutes(a['monitored_s']), 10059)                 # 20 min of power cut are not monitored
+        self.assertEqual(minutes(a['observed_s']), 10054)                  # and 5 min of cable pulled are not either
+        self.assertEqual(minutes(a['unknown_s']), 25)
+        self.assertEqual(minutes(a['downtime_s']), 99)                     # 10 + 30 + 59 so far; the cable outage is not downtime
+        self.assertEqual((a['outages'], a['ongoing'], a['completed']), (3, 1, 2))
+        self.assertAlmostEqual(100 * a['availability'], 99.0153, places=4)
+        self.assertEqual(minutes(a['mttr_s']), 20.0)                       # the one in progress is left out
+        self.assertAlmostEqual(a['mtbf_s'] / 3600, 55.31, places=2)
+        self.assertFalse(a['low_confidence'])
+
+    def test_an_outage_belongs_to_the_period_it_started_in(self):
+        data = self.data(self.internet(self.at(0, 3), self.at(0, 4)) + [(self.at(), 'monitor', 'start')],
+                         [(self.at(), self.at(1))])
+        a = analyze.availability(data, self.at(0, 3, 30), self.at(0, 12), now=self.at(1))      # starts inside the outage
+        self.assertEqual((a['outages'], a['downtime_s']), (0, 1800))       # the half hour still counts as down
+        self.assertIsNone(a['mtbf_s'])
+        self.assertIsNone(a['mttr_s'])
+        a = analyze.availability(data, self.at(0, 2), self.at(0, 3, 30), now=self.at(1))       # ends after the period
+        self.assertEqual((a['outages'], a['downtime_s']), (1, 1800))
+        self.assertEqual(a['completed'], 1)
+
+    def test_no_outages_has_no_mtbf(self):
+        data = self.data([(self.at(), 'monitor', 'start')], [(self.at(), self.at(0, 10))])
+        a = analyze.availability(data, self.at(), self.at(0, 10), now=self.at(1))
+        self.assertEqual((a['availability'], a['outages']), (1.0, 0))
+        self.assertIsNone(a['mtbf_s'])
+
+    def test_the_period_stops_at_now_and_unmonitored_time_is_unknown(self):
+        data = self.data([(self.at(), 'monitor', 'start')], [(self.at(), self.at(0, 0, 10))])  # the monitor stopped at 00:10
+        a = analyze.availability(data, self.at(), self.at(1), now=self.at(0, 0, 30))
+        self.assertEqual((a['period_s'], a['observed_s'], a['unknown_s']), (1800, 600, 1200))   # not "up" for the missing 20 min
+        self.assertTrue(a['low_confidence'])
+
+    def test_without_minute_csv_the_runs_are_used(self):
+        data = self.data([(self.at(), 'monitor', 'start'), (self.at(0, 0, 1), 'monitor', 'stop')], None)
+        a = analyze.availability(data, self.at(), self.at(0, 0, 10), now=self.at(1))
+        self.assertEqual(a['observed_s'], 60)
+
+    def test_a_period_with_nothing_observed(self):
+        data = self.data([(self.at(), 'monitor', 'start')], [(self.at(), self.at(0, 10))])
+        a = analyze.availability(data, self.at(3), self.at(4), now=self.at(5))
+        self.assertEqual(a['observed_s'], 0)
+        self.assertIsNone(a['availability'])
+        self.assertIsNone(analyze.availability(self.data([], None), self.at(), self.at(1), now=self.at(1)))
+
+    def test_cli_prints_the_figures_for_the_given_period(self):
+        import subprocess
+        out = subprocess.run([sys.executable, os.path.join(ROOT, 'analyze.py'), self.week(),
+                              '--from', '2026-08-03T00:00:00+02:00', '--to', '2026-08-09T23:59:00+02:00'],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        for expected in ('Availability, 03/08/2026 00:00 to 09/08/2026 23:59', 'Availability: 99.0153 % of observed time',
+                         'Unknown (monitor not running or its own cable down): 25 min 0 s, 0.25 %',
+                         'MTTR: 20 min 0 s (mean of 2 completed outage(s); 1 still in progress left out)',
+                         'MTBF: 55 h 18 min 20 s'):
+            self.assertIn(expected, out.stdout)
+
+    def test_month_window_and_times_typed_by_the_user(self):
+        start, end = analyze.month_window(dt.datetime(2026, 12, 15, 12, 0))
+        self.assertEqual((start.replace(tzinfo=None), end.replace(tzinfo=None)), (dt.datetime(2026, 12, 1), dt.datetime(2027, 1, 1)))
+        self.assertIsNotNone(analyze.local_time('2026-10-01').tzinfo)
+        self.assertEqual(analyze.local_time('2026-10-01T00:00:00+02:00').utcoffset(), dt.timedelta(hours=2))
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()
