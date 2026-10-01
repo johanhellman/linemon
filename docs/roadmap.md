@@ -19,7 +19,7 @@ Run for months without care: config, storage, retention, self-monitoring.
 | Spike | Time-box | Depends on |
 |---|---|---|
 | [#4](https://github.com/johanhellman/linemon/issues/4) One config file for the monitor and its extras ([findings](spikes/004-config.md); follow-ups [#23](https://github.com/johanhellman/linemon/issues/23), [#24](https://github.com/johanhellman/linemon/issues/24), [#25](https://github.com/johanhellman/linemon/issues/25)) | 0.5 day | – |
-| [#5](https://github.com/johanhellman/linemon/issues/5) Storage that stays fast with a year of data | 1 day | – |
+| [#5](https://github.com/johanhellman/linemon/issues/5) Storage that stays fast with a year of data ([findings](spikes/005-storage.md); follow-ups [#27](https://github.com/johanhellman/linemon/issues/27), [#28](https://github.com/johanhellman/linemon/issues/28), [#29](https://github.com/johanhellman/linemon/issues/29), [#30](https://github.com/johanhellman/linemon/issues/30)) | 1 day | – |
 | [#6](https://github.com/johanhellman/linemon/issues/6) Retention and off-device backup | 0.5 day | [#5](https://github.com/johanhellman/linemon/issues/5) |
 | [#7](https://github.com/johanhellman/linemon/issues/7) Let linemon notice when it is unhealthy | 1 day | [#4](https://github.com/johanhellman/linemon/issues/4) |
 
