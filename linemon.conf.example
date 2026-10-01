@@ -1,12 +1,15 @@
-# /etc/linemon/linemon.conf (example from spike #4; not read by any code yet)
+# /etc/linemon/linemon.conf (example: copy it there and edit what you need)
 #
 # Every setting is optional and shown here with its default, so an empty or missing
-# file behaves exactly like linemon does today. Command-line arguments override this
-# file, which overrides the defaults. Unknown settings are an error, so a typo can't
-# silently do nothing.
+# file behaves exactly like linemon without one. Command-line arguments (including
+# LINEMON_ARGS in /etc/default/linemon) override this file, which overrides the
+# defaults. Unknown settings are an error, so a typo can't silently do nothing.
 #
 # This file holds no secrets and is safe to paste into a bug report. Anything secret
-# lives in its own file readable by root only (see router.conf), and is named here.
+# lives in its own file readable by root only (see router.conf), never here.
+#
+# Changes take effect when the monitor restarts: sudo systemctl restart linemon.
+# Check a file first with: sudo /opt/linemon/linemon.py --check-config
 
 [monitor]
 # Wired interface connected to the ISP router. Probes never leave through another one.
@@ -19,7 +22,7 @@ interval = 1.0
 threshold = 3
 
 [hook]
-# Command that captures the ISP router's own status (empty = off).
+# Command that captures the ISP router's own status (empty or missing = off).
 # command = /opt/linemon/routers/zte_livebox.py
 # Seconds between captures during an outage.
 during = 30
@@ -27,9 +30,3 @@ during = 30
 interval = 300
 # Seconds before a capture is abandoned.
 timeout = 30
-
-# Later features each get their own section, off until enabled, for example:
-#
-# [notify.ntfy]
-# enabled = no
-# secret_file = /etc/linemon/ntfy.secret

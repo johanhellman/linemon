@@ -45,7 +45,7 @@ or an upgrade on a real Pi; those need a check there.
 now; later features add `[notify.<name>]`, `[path.<name>]` (backup link, #13),
 `[unifi]` (#14), `[metrics]` (#15). Every optional extra has `enabled = no` as its
 default. The full current option set is in
-[`004-linemon.conf.example`](004-linemon.conf.example).
+[`linemon.conf.example`](../../linemon.conf.example).
 
 **Precedence.** Defaults < file < command line. `LINEMON_ARGS` is just more command
 line, so it overrides the file; nothing changes for anyone who uses it today.

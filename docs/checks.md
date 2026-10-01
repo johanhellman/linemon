@@ -118,6 +118,27 @@ that was also down at any point during that period:
 | second ISP hop unreachable | The first operator router answered but the second didn't. |
 | beyond the ISP hops | The router and both hops answered, but the internet hosts didn't: further into the operator's network or beyond. |
 
+## Configuration
+
+Settings are read at start from `/etc/linemon/linemon.conf` (an INI file; see
+`linemon.conf.example` for every setting and its default), then overridden by
+command-line arguments, which include `LINEMON_ARGS` from `/etc/default/linemon`.
+The settings are `[monitor]` `iface`, `data`, `interval` and `threshold`, and `[hook]`
+`command`, `during`, `interval` and `timeout`: the same as the `--iface`, `--data`,
+`--interval`, `--threshold`, `--hook`, `--hook-during`, `--hook-interval` and
+`--hook-timeout` arguments.
+
+- **Strict.** An unknown setting, a value of the wrong type or out of range (for example a
+  `threshold` below 1), a file that can't be parsed, or an unknown argument is an error.
+  The monitor prints it to stderr (the systemd journal) and exits with status 78, which
+  the service is set not to restart on.
+- **No secrets.** `linemon.conf` never holds credentials. Secrets live in their own
+  root-only files, such as `router.conf`, read only by the extra that needs them.
+- **`--check-config`** validates the file and `LINEMON_ARGS` together, as the service
+  would use them, and exits 0 or 78. **`--migrate`** prints a `linemon.conf` equivalent to
+  `LINEMON_ARGS` and changes nothing.
+- A value in the file is read literally: `%` needs no escaping.
+
 ## Router captures
 
 The probes show *where* the path broke from the outside. A router capture adds what the
