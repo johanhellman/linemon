@@ -16,6 +16,7 @@ shows every time its internet session was (re)established.
 import argparse
 import csv
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -93,23 +94,74 @@ def router_during(captures, start, end, slack=5):
     return '; '.join(summaries)
 
 
+MINUTE_FIELDS = ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms']
+TAIL_BYTES = 4096
+
+
 def last_minute_end(data_dir):
-    """End of the most recent minute in minute.csv, or None."""
+    """End of the most recent minute in minute.csv, or None. Reads only the end of the file."""
     try:
-        with open(os.path.join(data_dir, 'minute.csv'), newline='') as f:
-            prev = last = None
-            for row in csv.reader(f):
-                prev, last = last, row
+        with open(os.path.join(data_dir, 'minute.csv'), 'rb') as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - TAIL_BYTES))
+            lines = f.read().decode(errors='replace').splitlines()
     except FileNotFoundError:
         return None
-    # the very last line can be cut short by a power cut: fall back to the one before
-    for row in (last, prev):
-        if row and row[0] != 'minute':
-            try:
-                return parse_time(row[0]) + dt.timedelta(minutes=1)
-            except ValueError:
-                continue
+    # The very last line can be cut short by a power cut: fall back to the one before.
+    for line in reversed(lines):
+        try:
+            return parse_time(line.split(',', 1)[0]) + dt.timedelta(minutes=1)
+        except ValueError:
+            continue  # the header, a partial line, or a line cut short
     return None
+
+
+def _minute_offset(f, size, t, window=8192):
+    """A byte offset in minute.csv, at the start of a line, from which reading forward
+    reaches every row at or after `t`.
+
+    The file only grows at the end, so its rows are in time order and a bisection finds
+    the place. It compares parsed times, not text: the UTC offset changes at daylight
+    saving time, so local ISO strings don't sort by instant across the change.
+    """
+    lo, hi = 0, size
+    while hi - lo > window:
+        mid = (lo + hi) // 2
+        f.seek(mid)
+        f.readline()  # we probably landed inside a line: skip the rest of it
+        try:
+            row_time = parse_time(f.readline().decode(errors='replace').split(',', 1)[0])
+        except ValueError:
+            hi = mid  # unreadable (e.g. cut short): look earlier
+            continue
+        if row_time < t:
+            lo = mid
+        else:
+            hi = mid
+    if lo:
+        f.seek(lo)
+        f.readline()
+        return f.tell()
+    return 0
+
+
+def minute_rows(data_dir, since):
+    """Rows of minute.csv at or after `since`, as dicts, without reading the whole file."""
+    try:
+        f = open(os.path.join(data_dir, 'minute.csv'), 'rb')
+    except FileNotFoundError:
+        return
+    with f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(_minute_offset(f, size, since))
+        text = io.TextIOWrapper(f, newline='', errors='replace')
+        for row in csv.DictReader(text, fieldnames=MINUTE_FIELDS):
+            try:
+                if parse_time(row['minute']) >= since:
+                    yield row
+            except (ValueError, TypeError):
+                continue  # the header, or a line cut short
+        text.detach()  # f is closed by the with
 
 
 def readable_event(row):

@@ -465,6 +465,68 @@ class TornLastLine(unittest.TestCase):
         self.assertEqual(analyze.last_minute_end(tmp), analyze.parse_time('2026-10-01T20:03:00+02:00'))
 
 
+class MinuteTail(unittest.TestCase):
+    """minute.csv is read from the end, not scanned whole (issue #28)."""
+
+    def make(self):
+        """Two targets, one row per minute, across the autumn clock change (UTC+2 to UTC+1)."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        utc = dt.datetime(2026, 10, 24, 20, 0, tzinfo=dt.timezone.utc)
+        change = dt.datetime(2026, 10, 25, 1, 0, tzinfo=dt.timezone.utc)
+        with open(os.path.join(tmp, 'minute.csv'), 'w', newline='') as f:
+            f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\r\n')
+            while utc < dt.datetime(2026, 10, 26, 4, 0, tzinfo=dt.timezone.utc):
+                zone = dt.timezone(dt.timedelta(hours=2 if utc < change else 1))
+                for target in ('gateway', '1.1.1.1'):
+                    f.write(f'{utc.astimezone(zone).isoformat()},{target},60,0,1.0,2.0\r\n')
+                utc += dt.timedelta(minutes=1)
+        return tmp
+
+    def full_scan(self, tmp, since):
+        import csv
+        with open(os.path.join(tmp, 'minute.csv'), newline='') as f:
+            return [r for r in csv.DictReader(f) if analyze.parse_time(r['minute']) >= since]
+
+    def test_rows_since_match_a_full_scan_across_the_clock_change(self):
+        tmp = self.make()
+        self.assertGreater(os.path.getsize(os.path.join(tmp, 'minute.csv')), 100000)  # bigger than the bisection window
+        utc = dt.timezone.utc
+        for since in (dt.datetime(2026, 10, 24, 10, 0, tzinfo=utc),      # before the data
+                      dt.datetime(2026, 10, 24, 22, 0, tzinfo=utc),
+                      dt.datetime(2026, 10, 25, 0, 59, tzinfo=utc),      # just before the change
+                      dt.datetime(2026, 10, 25, 1, 0, tzinfo=utc),       # the change
+                      dt.datetime(2026, 10, 25, 1, 30, tzinfo=utc),
+                      dt.datetime(2026, 10, 25, 23, 0, tzinfo=utc),
+                      dt.datetime(2026, 10, 26, 3, 59, tzinfo=utc),      # the last minute
+                      dt.datetime(2026, 10, 27, 0, 0, tzinfo=utc)):      # after the data
+            self.assertEqual(list(analyze.minute_rows(tmp, since)), self.full_scan(tmp, since), since)
+
+    def test_last_minute_end_matches_the_last_row(self):
+        tmp = self.make()
+        self.assertEqual(analyze.last_minute_end(tmp), dt.datetime(2026, 10, 26, 4, 0, tzinfo=dt.timezone.utc))
+
+    def test_last_minute_end_without_usable_data(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        self.assertIsNone(analyze.last_minute_end(tmp))                  # no file
+        self.assertEqual(list(analyze.minute_rows(tmp, dt.datetime.now().astimezone())), [])
+        path = os.path.join(tmp, 'minute.csv')
+        for text in ('', 'minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\r\n'):
+            with open(path, 'w') as f:
+                f.write(text)
+            self.assertIsNone(analyze.last_minute_end(tmp), repr(text))
+            self.assertEqual(list(analyze.minute_rows(tmp, dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc))), [])
+
+    def test_a_cut_short_last_line_is_skipped(self):
+        tmp = self.make()
+        with open(os.path.join(tmp, 'minute.csv'), 'a') as f:
+            f.write('2026-10-26T05:0')                                   # cut inside the time
+        self.assertEqual(analyze.last_minute_end(tmp), dt.datetime(2026, 10, 26, 4, 0, tzinfo=dt.timezone.utc))
+        since = dt.datetime(2026, 10, 26, 3, 58, tzinfo=dt.timezone.utc)
+        self.assertEqual(len(list(analyze.minute_rows(tmp, since))), 4)  # two minutes, two targets
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()
