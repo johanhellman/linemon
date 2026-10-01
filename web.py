@@ -103,19 +103,20 @@ def status(data_dir):
         })
 
     since = periods[0][0] if periods else None
+    stale = bool(last_data and (now - last_data).total_seconds() > 180)
     captures = [c for c in analyze.load_captures(data_dir) if since and c['time'] >= since]
-    internet = analyze.intersect_all([outages.get(h, []) for h in analyze.INTERNET_HOSTS])
+    # Outages still in progress run until now, or until the last data if the monitor has stopped.
+    open_end = last_data if stale else now
+    internet = analyze.intersect_all([outages.get(h, []) for h in analyze.INTERNET_HOSTS], open_end=open_end)
     internet_rows = []
-    for s, e in reversed(internet):
-        internet_rows.append({'start': iso(s), 'end': iso(e), 'duration_s': round((e - s).total_seconds()),
+    for s, e, ongoing in reversed(internet):
+        internet_rows.append({'start': iso(s), 'end': None if ongoing else iso(e), 'ongoing': ongoing,
+                              'duration_s': round((e - s).total_seconds()),
                               'layer': analyze.classify(s, e, outages),
                               'router': analyze.router_during(captures, s, e)})
     day_ago = now - dt.timedelta(hours=24)
     last_day = [r for r in internet_rows if analyze.parse_time(r['start']) >= day_ago]
-
-    hosts_down = [t for t in targets if t['name'] in analyze.INTERNET_HOSTS and t['down_since']]
-    internet_down_since = (max(t['down_since'] for t in hosts_down)
-                           if len(hosts_down) == len(analyze.INTERNET_HOSTS) else None)
+    internet_down_since = next((r['start'] for r in internet_rows if r['ongoing']), None)
 
     recent = list(reversed(with_down_durations(events, now)))[:60]
     router_status = None
@@ -133,7 +134,7 @@ def status(data_dir):
         'monitoring_since': iso(periods[0][0]) if periods else None,
         'router': change['detail'].split('->')[-1].strip() if change else None,
         'last_data': iso(last_data),
-        'stale': bool(last_data and (now - last_data).total_seconds() > 180),
+        'stale': stale,
         'internet_down_since': internet_down_since,
         'targets': targets,
         'internet': {
@@ -323,15 +324,13 @@ async function refresh() {
   document.getElementById('targets').replaceChildren(tg);
 
   const ob = document.createDocumentFragment();
-  if (d.internet_down_since) {
-    const tr = row([fmtTime(d.internet_down_since), 'ongoing',
-      fmtDur((Date.parse(d.now) - Date.parse(d.internet_down_since)) / 1000), 'in progress',
-      d.router_status && d.router_status.reason !== 'periodic' ? (d.router_status.summary || d.router_status.error || '') : ''], ['nw', 'nw', 'num nw', '', '']);
-    tr.className = 'ongoing'; ob.appendChild(tr);
-  }
-  if (!s.outages.length && !d.internet_down_since) ob.appendChild(row(['No internet outages yet.']));
-  s.outages.forEach(o => ob.appendChild(row([fmtTime(o.start), fmtTime(o.end), fmtDur(o.duration_s), o.layer, o.router],
-    ['nw', 'nw', 'num nw', '', ''])));
+  if (!s.outages.length) ob.appendChild(row(['No internet outages yet.']));
+  s.outages.forEach(o => {
+    const tr = row([fmtTime(o.start), o.ongoing ? 'ongoing' : fmtTime(o.end), fmtDur(o.duration_s),
+      o.ongoing ? 'in progress: ' + o.layer : o.layer, o.router], ['nw', 'nw', 'num nw', '', '']);
+    if (o.ongoing) tr.className = 'ongoing';
+    ob.appendChild(tr);
+  });
 
   const rc = document.getElementById('router-card');
   rc.hidden = !d.router_status;

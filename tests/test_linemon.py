@@ -275,6 +275,60 @@ class Analysis(unittest.TestCase):
         self.assertEqual(text, 'no IP; capture failed: timed out')
 
 
+class OngoingOutages(unittest.TestCase):
+    """An internet outage still in progress must be reported, not dropped (issue #2)."""
+
+    T0 = dt.datetime(2026, 10, 1, 20, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+
+    def at(self, seconds):
+        return self.T0 + dt.timedelta(seconds=seconds)
+
+    def test_intersect_all_with_open_intervals(self):
+        lists = [[(self.at(0), None, True)], [(self.at(2), None, True)], [(self.at(1), None, True)]]
+        self.assertEqual(analyze.intersect_all(lists), [])  # without an end time, open ones are skipped
+        self.assertEqual(analyze.intersect_all(lists, open_end=self.at(60)), [(self.at(2), self.at(60), True)])
+        # one host has already recovered: the overlap is a finished outage, not an ongoing one
+        lists[1] = [(self.at(2), self.at(30), False)]
+        self.assertEqual(analyze.intersect_all(lists, open_end=self.at(60)), [(self.at(2), self.at(30), False)])
+
+    def make_data(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        with open(os.path.join(tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n'
+                    f'{self.at(0).isoformat()},monitor,start,,iface=eth0 gateway=192.168.1.1\n'
+                    + ''.join(f'{self.at(600).isoformat()},{h},down,,\n' for h in linemon.INTERNET_HOSTS)
+                    + f'{self.at(600).isoformat()},isp_hop1,down,,\n')
+        with open(os.path.join(tmp, 'minute.csv'), 'w') as f:  # data runs until 20:12
+            f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n'
+                    f'{self.at(660).isoformat()},link,60,0,,\n')
+        return tmp
+
+    def test_cli_and_csv_include_the_ongoing_outage(self):
+        import csv
+        import subprocess
+        data = self.make_data()
+        out_csv = os.path.join(data, 'out.csv')
+        r = subprocess.run([sys.executable, os.path.join(ROOT, 'analyze.py'), data, '--csv', out_csv],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('Internet outages (all three hosts down): 1, 2 min 0 s in total (1 still in progress', r.stdout)
+        self.assertIn('first ISP hop unreachable (access network)  (still in progress)', r.stdout)
+        with open(out_csv) as f:
+            rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['end'], rows[0]['ongoing'], rows[0]['duration_s']), ('', 'yes', '120'))
+
+    def test_web_lists_the_ongoing_outage(self):
+        import web
+        d = web.status(self.make_data())
+        self.assertEqual(d['internet']['total'], 1)
+        row = d['internet']['outages'][0]
+        self.assertTrue(row['ongoing'])
+        self.assertIsNone(row['end'])
+        self.assertEqual(d['internet_down_since'], row['start'])
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()

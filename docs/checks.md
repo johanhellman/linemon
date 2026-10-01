@@ -93,6 +93,9 @@ These show whether name lookups fail together with the rest, or on their own.
 - **Saved immediately:** the `down` row is written to `events.csv` (and synced to disk)
   as soon as the target is declared down, so an outage is not lost if the monitor
   crashes or loses power. The duration is written on the matching `up` row.
+- **Still in progress:** an outage that hasn't ended when the data ends (or, on the web
+  page, now) is reported as *ongoing*. It is counted up to that moment, classified like any
+  other, and in the analyzer's CSV has an empty `end` and `ongoing` set to `yes`.
 - **Cadence:** each target is probed every second. A probe that times out takes about a
   second itself, so during outages the cadence is about 1.1 seconds.
 

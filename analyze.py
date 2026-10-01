@@ -164,13 +164,20 @@ def load_outages(data_dir, include_all=False):
     return outages, periods
 
 
-def intersect_all(interval_lists):
-    """Periods where every list has an interval covering the time."""
+def intersect_all(interval_lists, open_end=None):
+    """Periods where every list has an interval covering the time: [(start, end, ongoing)].
+
+    Intervals still open (end None) run until `open_end`, e.g. the end of the data
+    or now; a period where every list is still open is returned as ongoing, with
+    `open_end` as its provisional end. Without `open_end`, open intervals are skipped.
+    """
     points = []
     for intervals in interval_lists:
         for s, e, _ in intervals:
             if e is None:
-                continue
+                if open_end is None or open_end <= s:
+                    continue
+                e = open_end
             points.append((s, 1))
             points.append((e, -1))
     points.sort(key=lambda p: (p[0], p[1]))
@@ -183,7 +190,10 @@ def intersect_all(interval_lists):
             if t > start:
                 result.append((start, t))
             start = None
-    return result
+
+    def still_open(s):
+        return all(any(e is None and st <= s for st, e, _ in intervals) for intervals in interval_lists)
+    return [(s, e, open_end is not None and e == open_end and still_open(s)) for s, e in result]
 
 
 def overlaps(a_start, a_end, b_start, b_end, tolerance=0):
@@ -246,32 +256,38 @@ def main():
     print(f'Monitoring: {first:%d/%m %H:%M} to {last:%d/%m %H:%M} '
           f'({fmt_dur(monitored)} in {len(periods)} run(s))\n')
 
-    print('Per target (outages of at least 3 s):')
+    # Outages still in progress count up to the end of the data, and are marked as such.
+    print('Per target (outages of at least 3 s; ongoing ones counted up to the end of the data):')
     names = ['link', 'gateway', 'isp_hop1', 'isp_hop2'] + INTERNET_HOSTS + ['dns_gateway', 'dns_1.1.1.1']
     for name in names:
-        ivs = [(s, e) for s, e, _ in outages.get(name, []) if e]
+        ivs = [(s, e or last) for s, e, _ in outages.get(name, []) if (e or last) > s]
+        ongoing = sum(1 for _, e, _ in outages.get(name, []) if e is None)
         total = sum((e - s).total_seconds() for s, e in ivs)
         longest = max(((e - s).total_seconds() for s, e in ivs), default=0)
-        print(f'  {name:<12} {len(ivs):>4} outages  {fmt_dur(total):>16} total  longest {fmt_dur(longest)}')
+        print(f'  {name:<12} {len(ivs):>4} outages  {fmt_dur(total):>16} total  longest {fmt_dur(longest)}'
+              + ('  (still down)' if ongoing else ''))
 
-    internet = intersect_all([outages.get(h, []) for h in INTERNET_HOSTS])
-    total = sum((e - s).total_seconds() for s, e in internet)
-    print(f'\nInternet outages (all three hosts down): {len(internet)}, {fmt_dur(total)} in total')
+    internet = intersect_all([outages.get(h, []) for h in INTERNET_HOSTS], open_end=last)
+    total = sum((e - s).total_seconds() for s, e, _ in internet)
+    still = sum(1 for *_, ongoing in internet if ongoing)
+    print(f'\nInternet outages (all three hosts down): {len(internet)}, {fmt_dur(total)} in total'
+          + (f' ({still} still in progress at the end of the data)' if still else ''))
 
     captures = [c for c in load_captures(args.data) if first <= c['time']]
     rows = []
     by_layer = defaultdict(lambda: [0, 0.0])
     by_day = defaultdict(lambda: [0, 0.0])
-    for s, e in internet:
+    for s, e, ongoing in internet:
         layer = classify(s, e, outages)
         secs = (e - s).total_seconds()
         by_layer[layer][0] += 1
         by_layer[layer][1] += secs
         by_day[s.strftime('%d/%m')][0] += 1
         by_day[s.strftime('%d/%m')][1] += secs
-        rows.append({'start': s.isoformat(timespec='seconds'), 'end': e.isoformat(timespec='seconds'),
-                     'duration_s': round(secs), 'layer': layer, 'router': router_during(captures, s, e),
-                     'udm_match': ''})
+        rows.append({'start': s.isoformat(timespec='seconds'),
+                     'end': '' if ongoing else e.isoformat(timespec='seconds'),
+                     'duration_s': round(secs), 'ongoing': 'yes' if ongoing else '',
+                     'layer': layer, 'router': router_during(captures, s, e), 'udm_match': ''})
     if internet:
         print('\n  Where the path broke:')
         for layer, (n, secs) in sorted(by_layer.items(), key=lambda x: -x[1][0]):
@@ -281,7 +297,8 @@ def main():
             print(f'    {day}  {n:>4} outages  {fmt_dur(secs)}')
         print('\n  Longest:')
         for r in sorted(rows, key=lambda r: -r['duration_s'])[:5]:
-            print(f"    {r['start'][:19].replace('T', ' ')}  {fmt_dur(r['duration_s']):>14}  {r['layer']}")
+            print(f"    {r['start'][:19].replace('T', ' ')}  {fmt_dur(r['duration_s']):>14}  {r['layer']}"
+                  + ('  (still in progress)' if r['ongoing'] else ''))
             if r['router']:
                 print(f"    {'':19}  {'':>14}  router said: {r['router']}")
 
@@ -300,8 +317,8 @@ def main():
     if args.udm:
         udm = load_udm(args.udm, first, last)
         tol = args.tolerance
-        udm_matched = [u for u in udm if any(overlaps(u[0], u[1], s, e, tol) for s, e in internet)]
-        for r, (s, e) in zip(rows, internet):
+        udm_matched = [u for u in udm if any(overlaps(u[0], u[1], s, e, tol) for s, e, _ in internet)]
+        for r, (s, e, _) in zip(rows, internet):
             r['udm_match'] = 'yes' if any(overlaps(s, e, u[0], u[1], tol) for u in udm) else 'no'
         pi_matched = sum(r['udm_match'] == 'yes' for r in rows)
         print(f'\nUDM comparison (same period, {tol} s tolerance):')
@@ -317,7 +334,7 @@ def main():
 
     if args.csv:
         with open(args.csv, 'w', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=['start', 'end', 'duration_s', 'layer', 'router', 'udm_match'])
+            w = csv.DictWriter(f, fieldnames=['start', 'end', 'duration_s', 'ongoing', 'layer', 'router', 'udm_match'])
             w.writeheader()
             w.writerows(rows)
         print(f'\nWrote {len(rows)} outages to {args.csv}')
