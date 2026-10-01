@@ -139,6 +139,10 @@ Set it up on the monitor:
    sudo chmod 600 /etc/linemon/router.conf
    ```
 
+   If the file can be read by other users, the capture script warns in the journal
+   (`journalctl -u linemon`) every time it runs, and `install.sh` warns when you upgrade.
+   It keeps working: the warning is there to be fixed, not to stop your captures.
+
 2. Test it. It should print `"ok": true` and a summary like
    `fibre O5 operational · signal OK · internet up`:
 

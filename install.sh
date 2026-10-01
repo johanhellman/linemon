@@ -51,6 +51,13 @@ if [ "$hook" != off ]; then
 else
     echo "Router capture: off (see 'Capturing the router's own status' in the README)"
 fi
+# Password files must stay root-only. Only warn: changing someone's permissions is theirs to do.
+# (linemon.conf and the example hold no secrets, so they may be readable.)
+open_files=$(find /etc/linemon -maxdepth 1 -type f ! -name 'linemon.conf*' -perm /077 2>/dev/null || true)
+if [ -n "$open_files" ]; then
+    echo "Warning: other users can read these files, which may hold passwords. Run chmod 600 on them:"
+    echo "$open_files" | sed 's/^/     /'
+fi
 if [ ! -e /etc/linemon/linemon.conf ] && ! /usr/bin/python3 ./linemon.py --migrate | grep -q 'Nothing to migrate'; then
     echo "Tip: your settings are still in /etc/default/linemon. That keeps working;"
     echo "     /opt/linemon/linemon.py --migrate prints the equivalent /etc/linemon/linemon.conf."

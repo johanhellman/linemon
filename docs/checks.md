@@ -133,7 +133,10 @@ The settings are `[monitor]` `iface`, `data`, `interval` and `threshold`, and `[
   The monitor prints it to stderr (the systemd journal) and exits with status 78, which
   the service is set not to restart on.
 - **No secrets.** `linemon.conf` never holds credentials. Secrets live in their own
-  root-only files, such as `router.conf`, read only by the extra that needs them.
+  root-only files, such as `router.conf`, read only by the extra that needs them. If such
+  a file can be read by group or others, the extra warns on stderr (the journal, never the
+  web page or `captures.jsonl`), and `install.sh` lists it. Neither refuses to work or
+  changes the file's permissions.
 - **`--check-config`** validates the file and `LINEMON_ARGS` together, as the service
   would use them, and exits 0 or 78. **`--migrate`** prints a `linemon.conf` equivalent to
   `LINEMON_ARGS` and changes nothing.
