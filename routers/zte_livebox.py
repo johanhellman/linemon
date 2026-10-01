@@ -13,7 +13,8 @@ out, and prints one JSON line:
   zte_livebox.py --debug  also trace every request to stderr (no secrets)
 
 Credentials are read from /etc/linemon/router.conf (override with
-LINEMON_ROUTER_CONF), which should be readable by root only:
+LINEMON_ROUTER_CONF), which should be readable by root only (chmod 600); it warns
+on stderr, which goes to the journal, if other users can read it:
 
   [router]
   host = 192.168.1.1
@@ -191,7 +192,18 @@ def backoff_file():
     return os.path.join(DATA_DIR, 'router-login-failed')
 
 
+def warn_if_readable_by_others(path):
+    """Tell the journal (stderr, never the web page) if other users can read the password file."""
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        return
+    if mode & 0o077:
+        print(f'warning: {path} is readable by other users (mode {mode:03o}); run: chmod 600 {path}', file=sys.stderr)
+
+
 def capture():
+    warn_if_readable_by_others(CONFIG)
     cfg = configparser.ConfigParser(interpolation=None)  # passwords may contain '%'
     if not cfg.read(CONFIG) or 'router' not in cfg:
         return {'error': f'no [router] section in {CONFIG}'}

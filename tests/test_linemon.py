@@ -183,10 +183,13 @@ class LiveboxCapture(unittest.TestCase):
             self.server.server_close()
         shutil.rmtree(self.tmp)
 
-    def capture(self, password, reason='outage-start'):
+    def capture(self, password, reason='outage-start', mode=0o600):
         conf = os.path.join(self.tmp, 'router.conf')
+        if os.path.exists(conf):
+            os.chmod(conf, 0o600)  # a previous call may have made it read-only
         with open(conf, 'w') as f:
             f.write(f'[router]\nhost = 127.0.0.1:{self.server.server_port}\nusername = admin\npassword = {password}\n')
+        os.chmod(conf, mode)  # as the README says
         capture_dir = os.path.join(self.tmp, 'capture')
         os.makedirs(capture_dir, exist_ok=True)
         os.environ.update(LINEMON_ROUTER_CONF=conf, LINEMON_DATA=self.tmp,
@@ -215,6 +218,20 @@ class LiveboxCapture(unittest.TestCase):
         result, _ = self.capture('correct horse')
         self.assertIn('not retrying until', result['error'])
         self.assertEqual(FakeLivebox.logins, [False])  # no second attempt
+
+    def test_warns_when_the_password_file_is_readable_by_others(self):
+        import contextlib
+        import io
+        for mode, warns in ((0o600, False), (0o400, False), (0o640, True), (0o644, True)):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result, _ = self.capture('correct horse', mode=mode)
+            self.assertTrue(result['ok'], result)  # a warning, not a refusal: existing setups keep working
+            self.assertEqual('is readable by other users' in err.getvalue(), warns, oct(mode))
+            self.assertNotIn('correct horse', err.getvalue())
+            self.assertNotIn('chmod', json.dumps(result))  # nothing about it reaches captures.jsonl or the page
+            if warns:
+                self.assertIn(f'(mode {mode:03o})', err.getvalue())
 
     def test_router_unreachable(self):
         self.server.shutdown()
