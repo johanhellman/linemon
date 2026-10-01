@@ -199,6 +199,11 @@ periodic ones. After a rejected login it does not try again for 30 minutes.
 All in `/var/lib/linemon`. Times are ISO 8601 in local time with the UTC offset, e.g.
 `2026-10-01T16:33:05.256+02:00`.
 
+A power cut can leave the last line of `events.csv` or `minute.csv` half written. When
+the monitor starts it ends such a line, so the next row isn't glued on to it; the half
+row stays in the file and the analyzer and web page skip it, because it has no usable
+time or target.
+
 ### `events.csv`
 
 | Column | Meaning |
