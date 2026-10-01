@@ -126,6 +126,15 @@ def dns_probe(server, iface, timeout=1.0):
     return False, None, None
 
 
+def ends_with_newline(path):
+    with open(path, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            return True
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) == b'\n'
+
+
 class Monitor:
     def __init__(self, args):
         self.args = args
@@ -142,11 +151,18 @@ class Monitor:
             'minute.csv', ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms'])
 
     def _open_csv(self, name, header):
-        f = open(os.path.join(self.args.data, name), 'a', newline='')
+        path = os.path.join(self.args.data, name)
+        f = open(path, 'a', newline='')
         w = csv.writer(f)
         if f.tell() == 0:
             w.writerow(header)
             f.flush()
+        elif not ends_with_newline(path):
+            # A power cut can leave a half-written last line. End it, so the next
+            # row isn't glued on to it and lost with it.
+            f.write(w.dialect.lineterminator)
+            f.flush()
+            os.fsync(f.fileno())
         return f, w
 
     def event(self, t, target, kind, duration='', detail=''):

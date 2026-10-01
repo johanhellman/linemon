@@ -313,12 +313,11 @@ class SafeErrors(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp)
         self.assertEqual(self.api(tmp), (503, '{"error": "no data yet"}'))
-        with open(os.path.join(tmp, 'events.csv'), 'w') as f:
-            f.write('time,target,event,duration_s,detail\nnot-a-time,1.1.1.1,down,,SECRET\n')
+        os.mkdir(os.path.join(tmp, 'events.csv'))  # unreadable: the error text names the path
         code, body = self.api(tmp)
         self.assertEqual(code, 500)
         self.assertNotIn(tmp, body)
-        self.assertNotIn('not-a-time', body)
+        self.assertNotIn('events.csv', body)
         self.assertIn('status unavailable', body)
 
 
@@ -394,6 +393,76 @@ class OngoingOutages(unittest.TestCase):
         self.assertTrue(row['ongoing'])
         self.assertIsNone(row['end'])
         self.assertEqual(d['internet_down_since'], row['start'])
+
+
+class TornLastLine(unittest.TestCase):
+    """A power cut can leave the last line of a CSV half written (issue #27)."""
+
+    T0 = '2026-10-01T20:00:00.000+02:00'
+    EVENTS_HEADER = 'time,target,event,duration_s,detail\r\n'
+    MINUTE_HEADER = 'minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\r\n'
+
+    def data(self, events=None, minute=None):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        for name, text in (('events.csv', events), ('minute.csv', minute)):
+            if text is not None:
+                with open(os.path.join(tmp, name), 'w', newline='') as f:
+                    f.write(text)
+        return tmp
+
+    def monitor(self, tmp):
+        args = types.SimpleNamespace(iface='eth0', data=tmp, interval=1, threshold=3,
+                                     hook=None, hook_during=30, hook_interval=300, hook_timeout=30)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(mon.minute_f.close)
+        self.addCleanup(mon.events_f.close)
+        return mon
+
+    def test_next_event_is_not_glued_to_the_torn_line(self):
+        tmp = self.data(events=self.EVENTS_HEADER + f'{self.T0},gateway,down,,192.168.1.1\r\n'
+                                                    f'2026-10-01T20:00:05.000+02:00,dns_1.')  # cut short, no newline
+        mon = self.monitor(tmp)
+        mon.event(analyze.parse_time('2026-10-01T20:05:00.000+02:00'), 'monitor', 'start', '', 'eth0')
+        rows = analyze.load_events(tmp)
+        self.assertEqual([(r['target'], r['event']) for r in rows], [('gateway', 'down'), ('monitor', 'start')])
+        with open(os.path.join(tmp, 'events.csv'), newline='') as f:
+            self.assertEqual(f.read().count('\r\n'), 4)  # header, down, the torn line, start
+
+    def test_a_clean_file_is_left_alone(self):
+        text = self.EVENTS_HEADER + f'{self.T0},monitor,start,,eth0\r\n'
+        tmp = self.data(events=text)
+        self.monitor(tmp)
+        with open(os.path.join(tmp, 'events.csv'), newline='') as f:
+            self.assertEqual(f.read(), text)
+
+    def test_torn_lines_do_not_break_the_readers(self):
+        import web
+        # cut inside the time, inside the target, and a complete row after them
+        tmp = self.data(
+            events=self.EVENTS_HEADER + f'{self.T0},gateway,down,,\r\n2026-10-01T2\r\n2026-10-01T20:00:09.000+02:00,dns_\r\n'
+                                        f'2026-10-01T20:01:00.000+02:00,gateway,up,60,\r\n',
+            minute=self.MINUTE_HEADER + '2026-10-01T20:00:00+02:00,gateway,60,0,1.0,2.0\r\n2026-10-01T20:0')  # cut inside the time
+        self.assertEqual([(r['target'], r['event']) for r in analyze.load_events(tmp)],
+                         [('gateway', 'down'), ('gateway', 'up')])
+        self.assertEqual(analyze.last_minute_end(tmp), analyze.parse_time('2026-10-01T20:01:00+02:00'))  # the row before
+        since = analyze.parse_time('2026-10-01T19:00:00+02:00')
+        self.assertEqual([m['t'] for m in web.minute_series(tmp, since)], ['2026-10-01T20:00:00+02:00'])
+
+    def test_minute_csv_is_repaired_too(self):
+        tmp = self.data(minute=self.MINUTE_HEADER + '2026-10-01T20:00:00+02:00,gateway,60,0,1.0,2.0\r\n2026-10-01T20:01:00+02:00,ga')
+        mon = self.monitor(tmp)
+        mon.minute.writerow(['2026-10-01T20:02:00+02:00', 'gateway', 60, 0, '1.0', '2.0'])
+        mon.minute_f.flush()
+        with open(os.path.join(tmp, 'minute.csv'), newline='') as f:
+            lines = f.read().split('\r\n')
+        self.assertEqual(lines[-2], '2026-10-01T20:02:00+02:00,gateway,60,0,1.0,2.0')
+        self.assertEqual(analyze.last_minute_end(tmp), analyze.parse_time('2026-10-01T20:03:00+02:00'))
 
 
 class Trim(unittest.TestCase):

@@ -37,10 +37,13 @@ def minute_series(data_dir, since):
     try:
         with open(os.path.join(data_dir, 'minute.csv'), newline='') as f:
             for r in csv.DictReader(f):
-                t = analyze.parse_time(r['minute'])
+                try:
+                    t = analyze.parse_time(r['minute'])
+                    sent, lost = int(r['sent']), int(r['lost'])
+                except (ValueError, TypeError):
+                    continue  # a line cut short by a power cut
                 if t < since:
                     continue
-                sent, lost = int(r['sent']), int(r['lost'])
                 if sent:
                     by_minute.setdefault(r['minute'], {})[r['target']] = lost / sent
     except FileNotFoundError:

@@ -97,19 +97,34 @@ def last_minute_end(data_dir):
     """End of the most recent minute in minute.csv, or None."""
     try:
         with open(os.path.join(data_dir, 'minute.csv'), newline='') as f:
-            last = None
-            for last in csv.reader(f):
-                pass
+            prev = last = None
+            for row in csv.reader(f):
+                prev, last = last, row
     except FileNotFoundError:
         return None
-    if not last or last[0] == 'minute':
-        return None
-    return parse_time(last[0]) + dt.timedelta(minutes=1)
+    # the very last line can be cut short by a power cut: fall back to the one before
+    for row in (last, prev):
+        if row and row[0] != 'minute':
+            try:
+                return parse_time(row[0]) + dt.timedelta(minutes=1)
+            except ValueError:
+                continue
+    return None
+
+
+def readable_event(row):
+    """False for a line cut short by a power cut, which has no usable time or event."""
+    try:
+        parse_time(row['time'])
+    except (ValueError, TypeError):
+        return False
+    return bool(row['target'] and row['event'])
 
 
 def load_events(data_dir):
     with open(os.path.join(data_dir, 'events.csv'), newline='') as f:
-        return sorted(csv.DictReader(f), key=lambda r: parse_time(r['time']))
+        rows = [r for r in csv.DictReader(f) if readable_event(r)]
+    return sorted(rows, key=lambda r: parse_time(r['time']))
 
 
 def router_change(rows):
