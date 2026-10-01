@@ -223,6 +223,12 @@ sudo rm -rf /opt/linemon /etc/linemon /etc/default/linemon   # add /var/lib/line
 sudo systemctl daemon-reload
 ```
 
+## Roadmap
+
+See [docs/roadmap.md](docs/roadmap.md): where linemon is heading as a permanent monitor, as
+time-boxed spikes tracked in [GitHub issues](https://github.com/johanhellman/linemon/issues?q=label%3Aspike),
+and the ideas deliberately parked.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Commits follow Conventional Commits, and AI coding
