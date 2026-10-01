@@ -208,6 +208,11 @@ sudo rm -rf /opt/linemon /etc/linemon /etc/default/linemon   # add /var/lib/line
 sudo systemctl daemon-reload
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Commits follow Conventional Commits, and AI coding
+agents should read [AGENTS.md](AGENTS.md) first.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
