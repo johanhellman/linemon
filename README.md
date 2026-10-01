@@ -176,6 +176,21 @@ It reports how many of the gateway's outages the monitor also saw, and lists the
 didn't. It reads the `wan-failover-group-base ... is up/down` lines from the gateway's
 `messages` log (`.zst` archives too, if `zstd` is installed).
 
+## Deleting old data
+
+To start the series afresh, for example after a setup period, delete everything from
+before a given time. The monitor must be stopped while it runs; a backup of the data
+directory is written first.
+
+```bash
+sudo systemctl stop linemon
+sudo python3 /opt/linemon/trim.py --before 2026-10-01T18:00
+sudo systemctl start linemon
+```
+
+A time without a UTC offset is the monitor's local time. The analyzer and web page then
+count the monitoring period from the cut-off.
+
 ## Files
 
 Everything is in `/var/lib/linemon`:

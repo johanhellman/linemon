@@ -275,5 +275,55 @@ class Analysis(unittest.TestCase):
         self.assertEqual(text, 'no IP; capture failed: timed out')
 
 
+class Trim(unittest.TestCase):
+    def test_trim_before(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        data = os.path.join(tmp, 'linemon')
+        os.makedirs(os.path.join(data, 'captures', '20261001T170604-outage-start'))
+        os.makedirs(os.path.join(data, 'captures', '20261001T183000-outage-start'))
+        with open(os.path.join(data, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n'
+                    '2026-10-01T16:32:34.500+02:00,monitor,start,,iface=eth0 gateway=None\n'
+                    '2026-10-01T16:33:05.256+02:00,monitor,gateway,,None -> 192.168.1.1\n'
+                    '2026-10-01T17:00:00.000+02:00,1.1.1.1,down,,\n'
+                    '2026-10-01T17:00:30.000+02:00,1.1.1.1,up,30,\n'
+                    '2026-10-01T17:59:50.000+02:00,8.8.8.8,down,,\n'      # straddles the cut-off
+                    '2026-10-01T18:00:20.000+02:00,8.8.8.8,up,30,\n'
+                    '2026-10-01T18:30:00.000+02:00,9.9.9.9,down,,\n'
+                    '2026-10-01T18:30:10.000+02:00,9.9.9.9,up,10,\n')
+        with open(os.path.join(data, 'minute.csv'), 'w') as f:
+            f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n'
+                    '2026-10-01T17:59:00+02:00,link,60,0,,\n'
+                    '2026-10-01T18:00:00+02:00,link,60,0,,\n'
+                    '2026-10-01T18:31:00+02:00,link,60,0,,\n')
+        with open(os.path.join(data, 'captures.jsonl'), 'w') as f:
+            f.write('{"time": "2026-10-01T17:06:04+02:00", "reason": "outage-start"}\n'
+                    '{"time": "2026-10-01T18:30:00+02:00", "reason": "outage-start"}\n'
+                    '{"time": "2026-10-01T18:3\n')                       # line cut short by a power cut
+        with open(os.path.join(data, 'path.log'), 'w') as f:
+            f.write('2026-10-01T16:33:46.643+02:00 gateway=192.168.1.1\n'
+                    '2026-10-01T18:33:46.643+02:00 gateway=192.168.1.1\n')
+
+        import subprocess
+        # capture folders are named in the monitor's local time, so run as the Pi would (CEST)
+        r = subprocess.run([sys.executable, os.path.join(ROOT, 'trim.py'), '--before', '2026-10-01T18:00:00+02:00',
+                            '--data', data], capture_output=True, text=True,
+                           env=dict(os.environ, TZ='Europe/Madrid'))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(any(n.startswith('linemon-backup-') and n.endswith('.tar.gz') for n in os.listdir(tmp)))
+
+        outages, periods = analyze.load_outages(data)
+        self.assertEqual(periods[0][0].isoformat(), '2026-10-01T18:00:00+02:00')  # counted from the cut-off
+        self.assertEqual(list(outages), ['9.9.9.9'])  # the straddling outage has no start, so it's dropped
+        self.assertEqual(analyze.last_minute_end(data).strftime('%H:%M'), '18:32')
+        with open(os.path.join(data, 'minute.csv')) as f:
+            self.assertEqual(len(f.readlines()), 3)  # header + 18:00 + 18:31
+        self.assertEqual([c['reason'] for c in analyze.load_captures(data)], ['outage-start'])
+        with open(os.path.join(data, 'path.log')) as f:
+            self.assertEqual(len(f.readlines()), 1)
+        self.assertEqual(os.listdir(os.path.join(data, 'captures')), ['20261001T183000-outage-start'])
+
+
 if __name__ == '__main__':
     unittest.main()

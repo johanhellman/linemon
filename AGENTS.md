@@ -20,6 +20,7 @@ more than features**.
 | `analyze.py` | Outage analysis, CSV export, matching against a UniFi gateway's WAN log |
 | `web.py` | Read-only status page on port 8080 (service `linemon-web`, unprivileged); reuses `analyze.py` |
 | `routers/` | Capture hooks for specific ISP routers, e.g. `zte_livebox.py` |
+| `trim.py` | Deletes data from before a given time, with a backup first; only while the monitor is stopped |
 | `install.sh` | Installs or upgrades the services; restarts the monitor only if `linemon.py` or its unit changed |
 | `docs/checks.md` | The exact checks, outage rules, hook contract and file formats |
 | `tests/` | `unittest` suite with sanitised router fixtures and a fake router |
@@ -38,7 +39,7 @@ git config core.hooksPath .githooks       # enable the commit message check
 - **Standard library only.** No pip dependencies: the target is a stock Raspberry Pi OS
   (Python 3.11) with `ping` from iputils. Don't add a `requirements.txt`.
 - **Commits follow Conventional Commits** (`type(scope): description`), checked by
-  `.githooks/commit-msg` and CI. Scopes: `monitor`, `analyzer`, `web`, `install`,
+  `.githooks/commit-msg` and CI. Scopes: `monitor`, `analyzer`, `web`, `install`, `trim`,
   `zte_livebox` (or another router script), `docs`, `tests`. See `CONTRIBUTING.md`.
 - **Never commit personal or network data.** No credentials, real IP or MAC
   addresses, serial numbers, customer or ticket numbers, or measurement data. Router

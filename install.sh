@@ -19,7 +19,7 @@ if cmp -s linemon.py /opt/linemon/linemon.py \
 fi
 
 install -d /opt/linemon /opt/linemon/routers /var/lib/linemon
-install -m 755 linemon.py analyze.py web.py /opt/linemon/
+install -m 755 linemon.py analyze.py web.py trim.py /opt/linemon/
 install -m 755 routers/*.py /opt/linemon/routers/
 install -m 644 linemon.service linemon-web.service /etc/systemd/system/
 systemctl daemon-reload
