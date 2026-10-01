@@ -73,8 +73,34 @@ tail -n 1 /var/lib/linemon/path.log
 This should show the ISP router as `gateway`, with `isp_hop1` and `isp_hop2` filled in.
 
 To upgrade, pull and run `sudo ./install.sh` again. The monitor is only restarted if
-`linemon.py` changed, so upgrading the page or the analyzer doesn't interrupt the
-measurements.
+`linemon.py` or its service file changed, so upgrading the page or the analyzer doesn't
+interrupt the measurements. The upgrade checks your settings first, and stops without
+touching the running monitor if they have a mistake.
+
+## Configuration
+
+linemon works without any settings. To change one, copy the example and edit it:
+
+```bash
+sudo install -d -m 700 /etc/linemon
+sudo cp linemon.conf.example /etc/linemon/linemon.conf
+sudo nano /etc/linemon/linemon.conf
+sudo /opt/linemon/linemon.py --check-config    # catches typos before they matter
+sudo systemctl restart linemon                 # settings are read at start
+```
+
+Every setting is in [`linemon.conf.example`](linemon.conf.example) with its default and
+what it does. Precedence: defaults, then the file, then command-line arguments, including
+`LINEMON_ARGS` in `/etc/default/linemon`. Unknown settings are an error, so a typo can't
+silently do nothing; the monitor then refuses to start, and says why in
+`journalctl -u linemon`.
+
+The file holds **no secrets**, so you can paste it into a bug report. Passwords live in
+their own files that only root can read, such as `router.conf` below.
+
+**Upgrading from `LINEMON_ARGS`.** Nothing breaks: it still works and still overrides the
+file. To move to the file, run `sudo /opt/linemon/linemon.py --migrate`. It only prints the
+equivalent `linemon.conf`; review it, save it, empty `/etc/default/linemon` and restart.
 
 ## Capturing the router's own status
 
@@ -120,12 +146,21 @@ Set it up on the monitor:
    sudo /opt/linemon/routers/zte_livebox.py --test
    ```
 
-3. Turn it on and restart the monitor:
+3. Turn it on in `/etc/linemon/linemon.conf` (see [Configuration](#configuration)) and
+   restart the monitor:
+
+   ```ini
+   [hook]
+   command = /opt/linemon/routers/zte_livebox.py
+   ```
 
    ```bash
-   echo 'LINEMON_ARGS="--hook /opt/linemon/routers/zte_livebox.py"' | sudo tee /etc/default/linemon
+   sudo /opt/linemon/linemon.py --check-config
    sudo systemctl restart linemon
    ```
+
+   `router.conf` is read only by this script. The monitor itself never opens it, and
+   `linemon.conf` only names the script.
 
 Results go to `/var/lib/linemon/captures.jsonl`, and raw responses to
 `/var/lib/linemon/captures/`. After a failed login the script waits 30 minutes before
@@ -205,6 +240,13 @@ Everything is in `/var/lib/linemon`:
 | `captures/` | Raw router responses from captures taken around outages |
 
 The formats are described in [docs/checks.md](docs/checks.md#data-files).
+
+Settings are in `/etc/linemon`, readable by root only:
+
+| File | Contents |
+|---|---|
+| `linemon.conf` | The monitor's settings, no secrets (optional; see [Configuration](#configuration)) |
+| `router.conf` | The router's admin login, for the router capture only |
 
 ## Tests
 

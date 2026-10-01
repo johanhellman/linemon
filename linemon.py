@@ -27,9 +27,14 @@ It gets LINEMON_REASON, LINEMON_TIME, LINEMON_DATA and LINEMON_CAPTURE_DIR (a
 fresh directory for raw files) in its environment and must print one JSON
 object on its last line of output, ideally with "ok", "summary" and "uptime_s".
 
+Settings come from /etc/linemon/linemon.conf (see linemon.conf.example), overridden
+by command-line arguments such as LINEMON_ARGS. --check-config validates them and
+--migrate prints a linemon.conf equivalent to an existing LINEMON_ARGS.
+
 Needs root (or CAP_NET_RAW) to bind probes to --iface.
 """
 import argparse
+import configparser
 import csv
 import datetime as dt
 import json
@@ -369,18 +374,154 @@ class Monitor:
         self.event(now(), 'monitor', 'stop')
 
 
+CONFIG_PATH = '/etc/linemon/linemon.conf'
+ENV_PATH = '/etc/default/linemon'
+EX_CONFIG = 78  # the service doesn't restart on this: a typo must not become a restart loop
+
+# (section, key, flag, type, default, help). One table drives the command line, the
+# config file and the checks, so they can't drift apart; linemon.conf.example mirrors it.
+OPTIONS = [
+    ('monitor', 'iface', '--iface', str, 'eth0', 'wired interface connected to the ISP router'),
+    ('monitor', 'data', '--data', str, '/var/lib/linemon', 'output directory'),
+    ('monitor', 'interval', '--interval', float, 1.0, 'seconds between probes per target'),
+    ('monitor', 'threshold', '--threshold', int, 3, 'consecutive failures before a target is down'),
+    ('hook', 'command', '--hook', str, None, "command that captures the ISP router's own status (see above)"),
+    ('hook', 'during', '--hook-during', int, 30, 'seconds between captures during an outage'),
+    ('hook', 'interval', '--hook-interval', int, 300,
+     'seconds between periodic captures when the line is up (0 = only around outages)'),
+    ('hook', 'timeout', '--hook-timeout', int, 30, 'seconds before a capture is abandoned'),
+]
+MINIMUM = {'interval': 0.001, 'threshold': 1, 'hook_during': 1, 'hook_interval': 0, 'hook_timeout': 1}
+
+
+class ConfigError(Exception):
+    """A problem with the settings. The message says what and where."""
+
+
+def dest(flag):
+    return flag.lstrip('-').replace('-', '_')
+
+
+def read_config(path, required=False):
+    """Values from a linemon.conf as {argparse dest: value}. Unknown settings are errors."""
+    cp = configparser.ConfigParser(interpolation=None)  # '%' is an ordinary character
+    try:
+        with open(path) as f:
+            cp.read_file(f)
+    except FileNotFoundError:
+        if required:
+            raise ConfigError(f'{path}: no such file')
+        return {}
+    except (configparser.Error, OSError) as e:
+        raise ConfigError(f'{path}: {e}')
+    known = {(sec, key): (flag, typ) for sec, key, flag, typ, *_ in OPTIONS}
+    values = {}
+    for section in cp.sections():
+        for key, raw in cp.items(section):
+            if (section, key) not in known:
+                raise ConfigError(f'{path}: unknown setting "{key}" in [{section}]')
+            flag, typ = known[(section, key)]
+            try:
+                values[dest(flag)] = typ(raw) if raw != '' else None
+            except ValueError:
+                raise ConfigError(f'{path}: [{section}] {key} = {raw!r} is not a valid {typ.__name__}')
+    return values
+
+
+def read_env_args(path):
+    """The LINEMON_ARGS of a systemd EnvironmentFile such as /etc/default/linemon, as a list."""
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return []
+    args = []
+    for line in lines:
+        name, _, value = line.strip().partition('=')
+        if name == 'LINEMON_ARGS':
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in '"\'':
+                value = value[1:-1]  # as systemd does: the quotes wrap the whole value
+            try:
+                args = shlex.split(value)
+            except ValueError as e:
+                raise ConfigError(f'{path}: LINEMON_ARGS: {e}')
+    return args
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ConfigError(message)  # not argparse's exit status 2, which would make the service restart in a loop
+
+
+def build_parser(file_values, config_path=CONFIG_PATH):
+    p = Parser(description=__doc__.split('\n')[0])
+    for _, _, flag, typ, default, text in OPTIONS:
+        p.add_argument(flag, type=typ, default=default, help=text)
+    p.add_argument('--config', default=config_path, help=f'settings file (default {config_path})')
+    p.add_argument('--env-file', default=ENV_PATH, help=f'systemd environment file with LINEMON_ARGS (default {ENV_PATH})')
+    p.add_argument('--check-config', action='store_true', help='check the settings the service would use, then exit')
+    p.add_argument('--migrate', action='store_true',
+                   help='print a linemon.conf equivalent to LINEMON_ARGS in --env-file, then exit; changes nothing')
+    p.set_defaults(**file_values)  # the file overrides the defaults; real arguments override the file
+    return p
+
+
+def parse_settings(argv):
+    """The effective settings: defaults < config file < command line. Raises ConfigError."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--config')
+    known, _ = pre.parse_known_args(argv)
+    path = known.config or CONFIG_PATH
+    file_values = read_config(path, required=bool(known.config))
+    args = build_parser(file_values, path).parse_args(argv)
+    for name, low in MINIMUM.items():
+        if getattr(args, name) < low:
+            flag = next(f for _, _, f, *_ in OPTIONS if dest(f) == name)
+            raise ConfigError(f'{flag} must be at least {low:g}, not {getattr(args, name):g}')
+    return args, path, bool(file_values) or os.path.exists(path)
+
+
+def render_config(args, source):
+    """A linemon.conf with the settings in `args` that differ from the defaults."""
+    lines = [f'# Generated by linemon.py --migrate from {source}. Review it, then save it as {CONFIG_PATH}.']
+    section = None
+    for sec, key, flag, _, default, _ in OPTIONS:
+        value = getattr(args, dest(flag))
+        if value == default:
+            continue
+        if sec != section:
+            lines += ['', f'[{sec}]']
+            section = sec
+        lines.append(f'{key} = {value}')
+    if section is None:
+        lines.append('# Nothing to migrate: every setting is the default.')
+    return '\n'.join(lines) + '\n'
+
+
 def main():
-    p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    p.add_argument('--iface', default='eth0', help='wired interface connected to the ISP router')
-    p.add_argument('--data', default='/var/lib/linemon', help='output directory')
-    p.add_argument('--interval', type=float, default=1.0, help='seconds between probes per target')
-    p.add_argument('--threshold', type=int, default=3, help='consecutive failures before a target is down')
-    p.add_argument('--hook', help='command that captures the ISP router\'s own status (see above)')
-    p.add_argument('--hook-during', type=int, default=30, help='seconds between captures during an outage')
-    p.add_argument('--hook-interval', type=int, default=300,
-                   help='seconds between periodic captures when the line is up (0 = only around outages)')
-    p.add_argument('--hook-timeout', type=int, default=30, help='seconds before a capture is abandoned')
-    args = p.parse_args()
+    argv = sys.argv[1:]
+    try:
+        # The environment file is what the service passes as extra arguments, so a check
+        # or a migration looks at the same settings the monitor would start with.
+        pre = argparse.ArgumentParser(add_help=False)
+        pre.add_argument('--env-file', default=ENV_PATH)
+        pre.add_argument('--check-config', action='store_true')
+        pre.add_argument('--migrate', action='store_true')
+        mode, _ = pre.parse_known_args(argv)
+        if mode.migrate:
+            args = build_parser({}).parse_args(read_env_args(mode.env_file))
+            sys.stdout.write(render_config(args, mode.env_file))
+            return
+        args, path, found = parse_settings(argv + (read_env_args(mode.env_file) if mode.check_config else []))
+    except ConfigError as e:
+        print(f'linemon: configuration error: {e}', file=sys.stderr)
+        sys.exit(EX_CONFIG)
+    if args.check_config:
+        print('configuration OK')
+        print(f'  config file: {path if found else "none (defaults)"}')
+        print(f'  hook: {args.hook or "off"}')
+        return
 
     mon = Monitor(args)
     signal.signal(signal.SIGTERM, lambda *_: mon.stop.set())

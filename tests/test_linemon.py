@@ -668,6 +668,106 @@ class CapturesCache(unittest.TestCase):
                          [c['summary'] for c in captures if c['time'] >= since])
 
 
+class Config(unittest.TestCase):
+    """Settings come from defaults < linemon.conf < command line (issue #23)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.conf = os.path.join(self.tmp, 'linemon.conf')
+        self.env = os.path.join(self.tmp, 'default-linemon')
+
+    def write(self, text, path=None):
+        with open(path or self.conf, 'w') as f:
+            f.write(text)
+
+    def settings(self, *argv):
+        args, _, _ = linemon.parse_settings(['--config', self.conf, *argv])
+        return args
+
+    def test_no_file_means_the_old_defaults(self):
+        from unittest import mock
+        with mock.patch.object(linemon, 'CONFIG_PATH', os.path.join(self.tmp, 'absent.conf')):
+            args, _, found = linemon.parse_settings([])
+        self.assertFalse(found)
+        self.assertEqual((args.iface, args.data, args.interval, args.threshold), ('eth0', '/var/lib/linemon', 1.0, 3))
+        self.assertEqual((args.hook, args.hook_during, args.hook_interval, args.hook_timeout), (None, 30, 300, 30))
+
+    def test_precedence_is_defaults_then_file_then_command_line(self):
+        self.write('[monitor]\nthreshold = 5\niface = eth1\n[hook]\ncommand = /opt/x.py\nduring = 10\n')
+        args = self.settings()
+        self.assertEqual((args.threshold, args.iface, args.hook, args.hook_during), (5, 'eth1', '/opt/x.py', 10))
+        self.assertEqual(args.interval, 1.0)                                  # not in the file: the default
+        args = self.settings('--threshold', '4', '--hook', '/opt/y.py')
+        self.assertEqual((args.threshold, args.hook, args.iface), (4, '/opt/y.py', 'eth1'))
+
+    def test_mistakes_are_errors_that_say_where(self):
+        for text, expect in (('[monitor]\nthreshhold = 5\n', 'unknown setting "threshhold" in [monitor]'),
+                             ('[nope]\nx = 1\n', 'unknown setting "x" in [nope]'),
+                             ('[monitor]\nthreshold = many\n', '[monitor] threshold = \'many\' is not a valid int'),
+                             ('[monitor]\nthreshold = 0\n', '--threshold must be at least 1'),
+                             ('[monitor\nthreshold = 3\n', 'linemon.conf')):
+            self.write(text)
+            with self.assertRaises(linemon.ConfigError) as cm:
+                self.settings()
+            self.assertIn(expect, str(cm.exception), text)
+        with self.assertRaises(linemon.ConfigError):
+            self.settings('--threshold', 'abc')                               # not argparse's exit status 2
+        with self.assertRaises(linemon.ConfigError):
+            linemon.parse_settings(['--config', os.path.join(self.tmp, 'absent.conf')])  # asked for, so it must exist
+
+    def test_percent_and_empty_values(self):
+        self.write('[hook]\ncommand = /opt/a%b.py\n')
+        self.assertEqual(self.settings().hook, '/opt/a%b.py')                # like router.conf: '%' is ordinary
+        self.write('[hook]\ncommand =\n')
+        self.assertIsNone(self.settings().hook)
+
+    def run_linemon(self, *argv):
+        import subprocess
+        return subprocess.run([sys.executable, os.path.join(ROOT, 'linemon.py'), *argv], capture_output=True, text=True)
+
+    def test_check_config_and_its_exit_status(self):
+        self.write('[monitor]\nthreshold = 5\n')
+        ok = self.run_linemon('--check-config', '--config', self.conf, '--env-file', self.env)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn('configuration OK', ok.stdout)
+        self.write('[monitor]\nthreshhold = 5\n')
+        bad = self.run_linemon('--check-config', '--config', self.conf, '--env-file', self.env)
+        self.assertEqual(bad.returncode, linemon.EX_CONFIG)                   # the unit won't restart on this
+        self.assertIn('unknown setting "threshhold"', bad.stderr)
+        self.assertNotIn('Traceback', bad.stderr)
+
+    def test_check_config_looks_at_linemon_args_too(self):
+        self.write('')
+        self.write('LINEMON_ARGS="--threshold nope"\n', self.env)
+        bad = self.run_linemon('--check-config', '--config', self.conf, '--env-file', self.env)
+        self.assertEqual(bad.returncode, linemon.EX_CONFIG)
+
+    def test_migrate_prints_an_equivalent_file_and_changes_nothing(self):
+        self.write('LINEMON_ARGS="--hook /opt/linemon/routers/zte_livebox.py --hook-interval 600 --threshold 3"\n', self.env)
+        before = os.listdir(self.tmp)
+        out = self.run_linemon('--migrate', '--env-file', self.env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(os.listdir(self.tmp), before)
+        self.assertIn('[hook]\ncommand = /opt/linemon/routers/zte_livebox.py\ninterval = 600\n', out.stdout)
+        self.assertNotIn('threshold', out.stdout)                             # the default is left out
+        self.write(out.stdout)                                                # and it means the same as the arguments did
+        migrated, old = self.settings(), linemon.build_parser({}).parse_args(linemon.read_env_args(self.env))
+        for _, _, flag, *_ in linemon.OPTIONS:
+            self.assertEqual(getattr(migrated, linemon.dest(flag)), getattr(old, linemon.dest(flag)), flag)
+
+    def test_the_example_file_matches_the_option_table(self):
+        example = os.path.join(ROOT, 'linemon.conf.example')
+        values = linemon.read_config(example, required=True)                  # parses, no unknown settings
+        defaults = {linemon.dest(flag): default for _, _, flag, _, default, _ in linemon.OPTIONS}
+        self.assertEqual(values, {k: v for k, v in defaults.items() if v is not None})
+        with open(example) as f:
+            text = f.read()
+        for section, key, *_ in linemon.OPTIONS:                              # every option is documented
+            self.assertRegex(text, rf'(?m)^\[{section}\]')
+            self.assertRegex(text, rf'(?m)^#? ?{key} = ')
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()
