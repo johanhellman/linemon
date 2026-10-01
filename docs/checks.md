@@ -151,9 +151,11 @@ It must print one JSON object on its last line of output. linemon understands:
 | `ok` | `true` if the router reports everything healthy |
 | `summary` | One line for people, shown as "Router said" |
 | `uptime_s` | Seconds since the router's internet connection was established, if it has one |
-| `error` | Set instead of the above when the capture failed |
+| `error` | Set instead of the above when the capture failed. Shown on the web page, which has no login: use a short fixed message, never the router's reply or exception text. |
 
-Anything else (e.g. `details`) is stored as is. linemon adds `time`, `reason` and,
+Write details for troubleshooting to stderr: linemon passes them to the systemd journal
+(`journalctl -u linemon`), never to `captures.jsonl`. Anything else (e.g. `details`) is
+stored as is. linemon adds `time`, `reason` and,
 if raw files were saved, `files`, and appends the line to `captures.jsonl`.
 
 ### Session starts

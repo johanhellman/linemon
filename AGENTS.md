@@ -114,6 +114,10 @@ git config core.hooksPath .githooks       # enable the commit message check
   can't be blamed on Wi-Fi.
 - **The web page is read-only** and runs as an unprivileged dynamic user. Never expose
   router credentials or raw captures through it.
+- **Errors shown on the page are fixed, safe messages.** The page has no login, so
+  anything that reaches it (`captures.jsonl` errors, API responses) must never contain
+  router replies, exception text, file paths or tokens. Put details on stderr: they end
+  up in the systemd journal, which only root can read.
 - **Router hooks follow the contract** in `docs/checks.md#router-captures`: one JSON
   object on the last line of stdout, with `ok`, `summary`, `uptime_s` or `error`. They
   must back off after a failed login so the router account can't get locked.

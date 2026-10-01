@@ -160,7 +160,9 @@ class FakeLivebox(BaseHTTPRequestHandler):
             ok = (form.get('Password') == [expected] and form.get('Username') == ['admin']
                   and form.get('action') == ['login'] and form.get('_sessionTOKEN') == ['S1'])
             FakeLivebox.logins.append(ok)
-            self.reply(json.dumps({'login_need_refresh': ok, 'loginErrMsg': '' if ok else 'wrong password'}),
+            # Like the real router, the reply carries a session token, also when the login fails.
+            self.reply(json.dumps({'sess_token': 'SECRET-SESSION-TOKEN', 'login_need_refresh': ok,
+                                   'loginErrMsg': '' if ok else 'wrong password', 'lockingTime': 0}),
                        'application/json', cookie='SID=good; path=/' if ok else None)
         elif tag == 'logout_entry':
             ok = form.get('_sessionTOKEN') == [FakeLivebox.current_token]
@@ -206,6 +208,10 @@ class LiveboxCapture(unittest.TestCase):
     def test_wrong_password_backs_off(self):
         result, _ = self.capture('wrong')
         self.assertIn('login rejected', result['error'])
+        # the router's reply (with its session token) must not reach anything the web page shows (issue #3)
+        self.assertNotIn('SECRET', result['error'])
+        with open(os.path.join(self.tmp, 'router-login-failed')) as f:
+            self.assertNotIn('SECRET', f.read())
         result, _ = self.capture('correct horse')
         self.assertIn('not retrying until', result['error'])
         self.assertEqual(FakeLivebox.logins, [False])  # no second attempt
@@ -253,6 +259,67 @@ class HookLoop(unittest.TestCase):
         self.assertEqual(reasons[:4], ['periodic', 'outage-start', 'outage-ongoing', 'outage-end'], reasons)
         self.assertEqual(captures[1]['summary'], 'outage-start')
         self.assertTrue(os.path.exists(os.path.join(tmp, captures[1]['files'], 'raw.txt')))
+
+
+class SafeErrors(unittest.TestCase):
+    """Nothing from a hook's stderr or an exception reaches the unauthenticated page (issue #3)."""
+
+    def test_hook_stderr_stays_out_of_captures(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        hook = os.path.join(tmp, 'hook.py')
+        with open(hook, 'w') as f:
+            f.write('import sys\nprint("password=SECRET-PASSWORD", file=sys.stderr)\nsys.exit(1)\n')
+        args = types.SimpleNamespace(iface='eth0', data=tmp, interval=1, threshold=3,
+                                     hook=f'{sys.executable} {hook}', hook_during=30, hook_interval=0, hook_timeout=10)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(mon.minute_f.close)
+        self.addCleanup(mon.events_f.close)
+        import contextlib
+        import io
+        journal = io.StringIO()
+        with contextlib.redirect_stderr(journal):
+            mon.run_hook('outage-start')
+        with open(os.path.join(tmp, 'captures.jsonl')) as f:
+            stored = f.read()
+        self.assertIn('gave no result', stored)
+        self.assertNotIn('SECRET', stored)
+        self.assertIn('SECRET', journal.getvalue())  # but the owner can still see it in the journal
+
+    def api(self, data_dir):
+        import io
+        import contextlib
+        import urllib.error
+        import urllib.request
+        import web
+        web.Handler.data_dir = data_dir
+        server = ThreadingHTTPServer(('127.0.0.1', 0), web.Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/status') as r:
+                    return r.status, r.read().decode()
+            except urllib.error.HTTPError as e:
+                return e.code, e.read().decode()
+
+    def test_api_errors_are_generic(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        self.assertEqual(self.api(tmp), (503, '{"error": "no data yet"}'))
+        with open(os.path.join(tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\nnot-a-time,1.1.1.1,down,,SECRET\n')
+        code, body = self.api(tmp)
+        self.assertEqual(code, 500)
+        self.assertNotIn(tmp, body)
+        self.assertNotIn('not-a-time', body)
+        self.assertIn('status unavailable', body)
 
 
 class Analysis(unittest.TestCase):

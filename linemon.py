@@ -41,6 +41,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 
@@ -188,17 +189,21 @@ class Monitor:
         try:
             r = subprocess.run(shlex.split(self.args.hook), capture_output=True, text=True,
                                timeout=self.args.hook_timeout, env=env)
+            if r.stderr.strip():  # details for the journal only; captures.jsonl is shown on the web page
+                print(f'hook {reason}: {r.stderr.strip()[-2000:]}', file=sys.stderr, flush=True)
             out = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ''
             result = json.loads(out) if out else {
-                'error': f'no output (exit {r.returncode}) {r.stderr.strip()[-200:]}'}
+                'error': f'capture script gave no result (exit code {r.returncode}); see journalctl -u linemon'}
             if not isinstance(result, dict):
                 result = {'error': f'expected a JSON object, got: {out[:200]}'}
         except subprocess.TimeoutExpired:
             result = {'error': f'timed out after {self.args.hook_timeout} s'}
         except json.JSONDecodeError:
-            result = {'error': f'output is not JSON: {out[:200]}'}
+            print(f'hook {reason}: output is not JSON: {out[:500]}', file=sys.stderr, flush=True)
+            result = {'error': 'capture script gave unreadable output; see journalctl -u linemon'}
         except Exception as e:
-            result = {'error': str(e)}
+            print(f'hook {reason}: {e!r}', file=sys.stderr, flush=True)
+            result = {'error': 'capture script could not be run; see journalctl -u linemon'}
         if os.listdir(capture_dir):
             result['files'] = os.path.relpath(capture_dir, self.args.data)
         else:

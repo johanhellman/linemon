@@ -48,7 +48,17 @@ GPON_STATES = {
 
 
 class LoginError(Exception):
-    pass
+    """A rejected login. The message is safe to show; the router's reply is not."""
+
+
+def redact(value):
+    """A copy of a JSON value with tokens, passwords and hashes removed, for logs."""
+    if isinstance(value, dict):
+        return {k: '<hidden>' if any(w in k.lower() for w in ('token', 'pass', 'hash', 'sess', 'cookie'))
+                else redact(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    return value
 
 
 def parse_xml(text):
@@ -150,7 +160,13 @@ class Router:
             '_sessionTOKEN': entry.get('sess_token', ''),
         }))
         if not result.get('login_need_refresh'):
-            raise LoginError(json.dumps(result)[:200])
+            # The reply can carry a session token: log it (redacted) for the owner of the
+            # Pi, and give linemon only a fixed message, since errors appear on the web page.
+            print(f'login rejected; router replied: {json.dumps(redact(result))[:500]}', file=sys.stderr)
+            locked = str(result.get('lockingTime', ''))
+            if locked.isdigit() and int(locked) > 0:
+                raise LoginError(f'the router has locked the login for {locked} s')
+            raise LoginError('wrong username or password?')
 
     def logout(self):
         """Log out, so the session doesn't linger. Returns whether the router confirmed it."""

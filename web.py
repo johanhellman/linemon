@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import json
 import os
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import analyze
@@ -376,8 +377,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = json.dumps(status(self.data_dir)).encode()
                 self.send(200, 'application/json', body)
-            except Exception as e:  # e.g. no data yet
-                self.send(500, 'application/json', json.dumps({'error': str(e)}).encode())
+            except FileNotFoundError:
+                self.send(503, 'application/json', json.dumps({'error': 'no data yet'}).encode())
+            except Exception:
+                # The page has no login: exception text (paths, data) goes to the journal only.
+                traceback.print_exc()
+                self.send(500, 'application/json',
+                          json.dumps({'error': 'status unavailable; see journalctl -u linemon-web'}).encode())
         else:
             self.send(404, 'text/plain', b'Not found')
 
