@@ -4,11 +4,15 @@ Wants=network-online.target time-sync.target
 After=network-online.target time-sync.target
 
 [Service]
-# Optional extra arguments, e.g. LINEMON_ARGS="--hook /opt/linemon/routers/zte_livebox.py"
+# Settings are in /etc/linemon/linemon.conf. Anything in LINEMON_ARGS (optional, in
+# /etc/default/linemon) is added as command-line arguments and overrides the file.
 EnvironmentFile=-/etc/default/linemon
-ExecStart=/usr/bin/python3 /opt/linemon/linemon.py --iface eth0 --data /var/lib/linemon $LINEMON_ARGS
+ExecStart=/usr/bin/python3 /opt/linemon/linemon.py $LINEMON_ARGS
 Restart=always
 RestartSec=5
+# Exit status 78 means the settings have a mistake: restarting can't fix that, and
+# would only fill the journal. install.sh checks them before it restarts anything.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=multi-user.target

@@ -768,6 +768,34 @@ class Config(unittest.TestCase):
             self.assertRegex(text, rf'(?m)^#? ?{key} = ')
 
 
+class InstallFiles(unittest.TestCase):
+    """What the tests can see of install.sh and the unit; the rest needs a Pi (issue #24)."""
+
+    def read(self, name):
+        with open(os.path.join(ROOT, name)) as f:
+            return f.read()
+
+    def test_the_unit_lets_the_file_decide_and_does_not_loop_on_a_bad_config(self):
+        unit = self.read('linemon.service')
+        exec_start = next(line for line in unit.splitlines() if line.startswith('ExecStart='))
+        self.assertEqual(exec_start, 'ExecStart=/usr/bin/python3 /opt/linemon/linemon.py $LINEMON_ARGS')  # no flags that shadow the file
+        self.assertIn(f'RestartPreventExitStatus={linemon.EX_CONFIG}', unit)
+
+    def test_install_checks_the_settings_before_changing_anything(self):
+        import subprocess
+        script = self.read('install.sh')
+        self.assertEqual(subprocess.run(['bash', '-n', os.path.join(ROOT, 'install.sh')]).returncode, 0)
+        check = script.index('linemon.py --check-config')
+        for first_change in ('install -d', 'install -m', 'systemctl restart', 'systemctl daemon-reload'):
+            self.assertLess(check, script.index(first_change), first_change)
+
+    def test_every_file_install_copies_exists(self):
+        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', 'linemon.service', 'linemon-web.service',
+                     'linemon.conf.example'):
+            self.assertTrue(os.path.exists(os.path.join(ROOT, name)), name)
+            self.assertIn(name, self.read('install.sh'))
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()
