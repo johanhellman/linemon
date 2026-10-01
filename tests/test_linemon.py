@@ -527,6 +527,65 @@ class MinuteTail(unittest.TestCase):
         self.assertEqual(len(list(analyze.minute_rows(tmp, since))), 4)  # two minutes, two targets
 
 
+class CrashGap(unittest.TestCase):
+    """Time the monitor wasn't running is not monitored time (issue #19)."""
+
+    TZ = dt.timezone(dt.timedelta(hours=2))
+
+    def at(self, hour, minute=0):
+        return dt.datetime(2026, 10, 5, hour, minute, tzinfo=self.TZ)
+
+    def data(self, events, minutes=()):
+        """events: [(time, target, event)]; minutes: [(from, to)] with a row for each minute."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        with open(os.path.join(tmp, 'events.csv'), 'w', newline='') as f:
+            f.write('time,target,event,duration_s,detail\r\n')
+            for t, target, kind in events:
+                f.write(f'{t.isoformat()},{target},{kind},,\r\n')
+        if minutes:
+            with open(os.path.join(tmp, 'minute.csv'), 'w', newline='') as f:
+                f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\r\n')
+                for start, end in minutes:
+                    t = start
+                    while t < end:
+                        f.write(f'{t.isoformat()},gateway,60,0,1.0,2.0\r\n')
+                        t += dt.timedelta(minutes=1)
+        return tmp
+
+    def power_cut(self):
+        """Runs 00:00-18:00 with an outage open from 17:50, loses power, restarts at 18:20."""
+        events = [(self.at(0), 'monitor', 'start')]
+        events += [(self.at(17, 50), h, 'down') for h in analyze.INTERNET_HOSTS]
+        events += [(self.at(18, 20), 'monitor', 'start')]
+        return events, [(self.at(0), self.at(18)), (self.at(18, 20), self.at(18, 30))]
+
+    def test_the_gap_after_a_power_cut_is_not_monitored(self):
+        events, minutes = self.power_cut()
+        outages, periods = analyze.load_outages(self.data(events, minutes))
+        self.assertEqual(periods, [(self.at(0), self.at(18)), (self.at(18, 20), self.at(18, 30))])
+        # the outage that was open when the power went is cut there, not carried to the restart
+        for host in analyze.INTERNET_HOSTS:
+            self.assertEqual(outages[host], [(self.at(17, 50), self.at(18), True)])
+        internet = analyze.intersect_all([outages[h] for h in analyze.INTERNET_HOSTS])
+        self.assertEqual(internet, [(self.at(17, 50), self.at(18), False)])
+
+    def test_without_minute_rows_the_last_event_is_the_evidence(self):
+        events, _ = self.power_cut()
+        _, periods = analyze.load_outages(self.data(events))
+        self.assertEqual(periods[0], (self.at(0), self.at(17, 50)))
+
+    def test_a_clean_stop_ends_the_run_at_the_stop(self):
+        events = [(self.at(0), 'monitor', 'start'), (self.at(12), 'monitor', 'stop'), (self.at(12, 10), 'monitor', 'start')]
+        _, periods = analyze.load_outages(self.data(events, [(self.at(0), self.at(12)), (self.at(12, 10), self.at(12, 20))]))
+        self.assertEqual(periods, [(self.at(0), self.at(12)), (self.at(12, 10), self.at(12, 20))])
+
+    def test_a_restart_straight_away_loses_nothing(self):
+        events = [(self.at(0), 'monitor', 'start'), (self.at(0, 0), 'monitor', 'start')]
+        _, periods = analyze.load_outages(self.data(events))
+        self.assertEqual(periods[0], (self.at(0), self.at(0)))  # never before it started
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()

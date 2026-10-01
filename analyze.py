@@ -164,6 +164,40 @@ def minute_rows(data_dir, since):
         text.detach()  # f is closed by the with
 
 
+def last_minute_before(data_dir, t):
+    """Start of the last minute in minute.csv that began before `t`, or None."""
+    try:
+        f = open(os.path.join(data_dir, 'minute.csv'), 'rb')
+    except FileNotFoundError:
+        return None
+    last = None
+    with f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(_minute_offset(f, size, t))
+        text = io.TextIOWrapper(f, newline='', errors='replace')
+        for row in csv.DictReader(text, fieldnames=MINUTE_FIELDS):
+            try:
+                minute = parse_time(row['minute'])
+            except (ValueError, TypeError):
+                continue  # the header, or a line cut short
+            if minute >= t:
+                break
+            last = minute
+        text.detach()
+    return last
+
+
+def crash_end(data_dir, started, last_seen, restart):
+    """When a run that ended in a restart with no 'stop' row (a crash or power cut) was last
+    known to be running: its latest event or minute row, never before it started or
+    after the restart. The time in between is not monitored, so it is not up."""
+    minute = last_minute_before(data_dir, restart)
+    evidence = [last_seen or started]
+    if minute:
+        evidence.append(minute + dt.timedelta(minutes=1))
+    return max(started, min(restart, max(evidence)))
+
+
 def readable_event(row):
     """False for a line cut short by a power cut, which has no usable time or event."""
     try:
@@ -197,27 +231,32 @@ def load_outages(data_dir, include_all=False):
         rows = [dict(change, event='start')] + rows[rows.index(change) + 1:]
     outages = defaultdict(list)
     open_down = {}
-    periods, started = [], None
+    periods, started, last_seen = [], None, None
     for r in rows:
         t, target, kind = parse_time(r['time']), r['target'], r['event']
         if target == 'monitor':
             if kind not in ('start', 'stop'):
+                last_seen = t
                 continue
+            # A start with no 'stop' before it means the run crashed or lost power: it ended
+            # when it was last seen, not when the monitor came back.
+            run_end = crash_end(data_dir, started, last_seen, t) if kind == 'start' and started else t
             # a restart ends every outage that was still open
             for tgt, start in open_down.items():
-                outages[tgt].append((start, t, True))
+                outages[tgt].append((start, run_end, True))
             open_down.clear()
             if kind == 'start':
                 if started:
-                    periods.append((started, t))
+                    periods.append((started, run_end))
                 started = t
             elif started:
-                periods.append((started, t))
+                periods.append((started, run_end))
                 started = None
         elif kind == 'down':
             open_down[target] = t
         elif kind == 'up' and target in open_down:
             outages[target].append((open_down.pop(target), t, False))
+        last_seen = t
     # While the line is stable no events are written, so the latest per-minute
     # measurement is the best evidence of how long the monitor has been running.
     end = parse_time(rows[-1]['time']) if rows else None
