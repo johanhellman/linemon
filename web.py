@@ -34,20 +34,13 @@ def minute_series(data_dir, since):
     all had at once.
     """
     by_minute = {}
-    try:
-        with open(os.path.join(data_dir, 'minute.csv'), newline='') as f:
-            for r in csv.DictReader(f):
-                try:
-                    t = analyze.parse_time(r['minute'])
-                    sent, lost = int(r['sent']), int(r['lost'])
-                except (ValueError, TypeError):
-                    continue  # a line cut short by a power cut
-                if t < since:
-                    continue
-                if sent:
-                    by_minute.setdefault(r['minute'], {})[r['target']] = lost / sent
-    except FileNotFoundError:
-        return []
+    for r in analyze.minute_rows(data_dir, since):
+        try:
+            sent, lost = int(r['sent']), int(r['lost'])
+        except (ValueError, TypeError):
+            continue  # a line cut short by a power cut
+        if sent:
+            by_minute.setdefault(r['minute'], {})[r['target']] = lost / sent
     series = []
     for minute in sorted(by_minute):
         m = by_minute[minute]
