@@ -1080,6 +1080,245 @@ class LocalErrors(unittest.TestCase):
         self.assertIn('router capture failed unexpectedly', self.err.getvalue())
 
 
+class HealthSignals(unittest.TestCase):
+    """The monitor notices when it can't trust its own measurements (issue #41)."""
+
+    T0 = dt.datetime(2026, 10, 2, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
+
+    def setUp(self):
+        import contextlib
+        import io
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp := self.tmp)
+        args = types.SimpleNamespace(iface='eth0', data=self.tmp, interval=1.0, threshold=3,
+                                     hook=None, hook_during=30, hook_interval=300, hook_timeout=30)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            self.mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(lambda: [f.close() for f in (self.mon.events_f, self.mon.minute_f) if f])
+        self.err = io.StringIO()
+        redirect = contextlib.redirect_stderr(self.err)
+        redirect.__enter__()
+        self.addCleanup(redirect.__exit__, None, None, None)
+        # a world we control
+        self.elapsed, self.wall_jump = 0, 0.0
+        self.ntp, self.throttled, self.free = 'yes', 'throttled=0x0', 20e9
+        self.stalled = set()
+        self.mon.wall = lambda: 1_000_000.0 + self.elapsed + self.wall_jump
+        self.mon.mono = lambda: 5_000.0 + self.elapsed
+        self.mon.read_ntp = lambda: self.ntp
+        self.mon.read_throttled = lambda: self.throttled
+        self.mon.read_disk = lambda: (self.free, 32e9)
+
+    def step(self, bad=False, n=1):
+        """n samples 15 s apart. bad=True makes a probe thread look stalled in them."""
+        for _ in range(n):
+            self.elapsed += 15
+            mono = self.mon.mono()
+            for name in ('gateway', '1.1.1.1', 'maintenance'):
+                self.mon.beats[name] = mono - 100 if (bad and name == 'gateway') else mono
+            self.mon.health_step(t=self.T0 + dt.timedelta(seconds=self.elapsed))
+        return self.health()
+
+    def health(self):
+        with open(os.path.join(self.tmp, 'health.json')) as f:
+            return json.load(f)
+
+    def events(self):
+        with open(os.path.join(self.tmp, 'events.csv'), newline='') as f:
+            return [line for line in f.read().split('\r\n') if line][1:]
+
+    # --- the file and the state machine
+
+    def test_healthy_writes_health_json_and_no_events(self):
+        h = self.step(n=3)
+        self.assertEqual((h['state'], h['unhealthy_since'], h['reasons']), ('healthy', None, []))
+        self.assertEqual(set(h['signals']), {'threads', 'probe_errors', 'writes', 'clock', 'power', 'disk'})
+        self.assertEqual(self.events(), [])
+        self.assertTrue(os.stat(os.path.join(self.tmp, 'health.json')).st_mode & 0o004)  # the web page's user can read it
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, 'health.json.tmp')))
+
+    def test_one_odd_sample_does_not_flap(self):
+        for bad in (True, False, True, False, False, True, False):
+            self.assertEqual(self.step(bad=bad)['state'], 'healthy')
+        self.assertEqual(self.events(), [])
+
+    def test_unhealthy_after_two_bad_samples_and_healthy_after_four_good_ones(self):
+        self.step()                                                      # 15 s: good
+        self.step(bad=True)                                              # 30 s: first bad
+        h = self.step(bad=True)                                          # 45 s: second bad -> unhealthy
+        self.assertEqual((h['state'], h['reasons'], h['signals']['threads']['state']), ('unhealthy', ['probe-stalled'], 'unhealthy'))
+        self.assertEqual(h['unhealthy_since'], linemon.iso(self.T0 + dt.timedelta(seconds=30)))
+        self.assertEqual(self.events(), ['2026-10-02T12:00:30.000+02:00,monitor,unhealthy,,probe-stalled'])  # from the first bad sample
+        for _ in range(3):
+            self.assertEqual(self.step()['state'], 'unhealthy')           # 60, 75, 90 s: good, but not yet trusted
+        self.assertEqual(self.step()['state'], 'healthy')                # 105 s: the fourth good sample
+        self.assertEqual(self.events()[1], '2026-10-02T12:01:00.000+02:00,monitor,healthy,30,')   # first good sample; 30 s unhealthy
+
+    def test_a_bad_sample_during_recovery_starts_the_count_again(self):
+        self.step(bad=True, n=2)
+        self.step(n=3)
+        self.step(bad=True)
+        self.assertEqual(self.step(n=3)['state'], 'unhealthy')
+        self.assertEqual(self.step()['state'], 'healthy')
+
+    def test_the_new_events_do_not_confuse_the_readers(self):
+        import web
+        self.mon.event(self.T0 - dt.timedelta(minutes=5), 'monitor', 'start', '', 'eth0')
+        self.step(bad=True, n=2)
+        self.step(n=4)
+        self.assertEqual([r['event'] for r in analyze.load_events(self.tmp) if r['target'] == 'monitor'], ['start', 'unhealthy', 'healthy'])
+        outages, periods = analyze.load_outages(self.tmp)
+        self.assertEqual((dict(outages), len(periods)), ({}, 1))          # not outages, and not a new run
+        self.assertEqual(len(web.status(self.tmp)['events']), 3)
+
+    # --- one test per signal
+
+    def test_stalled_thread(self):
+        self.step()
+        self.assertEqual(self.step(bad=True)['signals']['threads']['state'], 'unhealthy')
+        self.assertIn('gateway', self.health()['signals']['threads']['value'])
+
+    def test_a_slow_interval_is_not_a_stall(self):
+        self.mon.args.interval = 60                                      # one probe a minute
+        self.step()
+        self.mon.beats['gateway'] = self.mon.mono() - 100                # 100 s is fine here: 3 x 60 + 5 = 185
+        self.mon.health_step(t=self.T0)
+        self.assertEqual(self.health()['signals']['threads']['state'], 'ok')
+
+    def test_the_hook_thread_is_not_a_probe_thread(self):
+        self.step()
+        self.mon.beats['hook'] = self.mon.mono() - 1000
+        self.assertEqual(self.step()['state'], 'healthy')
+
+    def test_probe_errors_for_a_minute(self):
+        self.mon.probe_error_times.append(self.mon.mono())
+        self.assertEqual(self.step()['signals']['probe_errors']['state'], 'unhealthy')
+        self.assertEqual(self.step(n=2)['signals']['probe_errors']['state'], 'unhealthy')   # 45 s: still counts
+        self.assertEqual(self.step()['signals']['probe_errors']['state'], 'ok')              # 60 s: it has aged out
+
+    def test_rows_waiting_to_be_written(self):
+        self.mon.pending_events.append(['t', 'gateway', 'down', '', ''])
+        h = self.step(n=2)
+        self.assertEqual((h['state'], h['reasons']), ('unhealthy', ['write-failing']))
+
+    def test_clock_step(self):
+        self.step()
+        self.wall_jump = 3600                                            # NTP puts the clock an hour forward
+        h = self.step()
+        self.assertEqual((h['signals']['clock']['state'], h['signals']['clock']['value']), ('unhealthy', 'stepped by +3600 s'))
+        self.assertIn('timestamps around it are unreliable', self.err.getvalue())
+        self.step(n=3)                                                   # unreliable for a minute after
+        self.assertEqual(self.health()['state'], 'unhealthy')
+        self.assertEqual(self.step()['signals']['clock']['state'], 'ok')  # no new jump: the reference moved on
+        self.assertEqual(self.events()[0].split(',')[1:], ['monitor', 'unhealthy', '', 'clock'])
+
+    def test_a_little_slew_is_not_a_step(self):
+        self.step()
+        self.wall_jump = 1.5
+        self.assertEqual(self.step()['signals']['clock']['state'], 'ok')
+
+    def test_ntp_not_synchronised(self):
+        self.ntp = 'no'
+        self.assertEqual(self.step()['signals']['clock']['state'], 'degraded')       # booting: not yet a problem
+        self.step(n=38)                                                              # unsynchronised for 570 s
+        self.assertEqual(self.health()['signals']['clock']['state'], 'degraded')
+        self.assertEqual(self.step(n=2)['signals']['clock']['state'], 'degraded')    # exactly 600 s: still within the grace
+        self.assertEqual(self.step()['signals']['clock']['state'], 'unhealthy')      # 615 s: past it
+        self.ntp, self.mon.slow_at = 'yes', None                                     # read once a minute; force it here
+        self.assertEqual(self.step()['signals']['clock']['state'], 'ok')
+        self.ntp = ''                                                                # can't tell
+        self.mon.slow_at = None
+        self.assertEqual(self.step()['signals']['clock']['state'], 'degraded')
+
+    def test_power(self):
+        for raw, state, value in (('throttled=0x0', 'ok', 'ok'), ('throttled=0x1', 'unhealthy', 'under-voltage now'),
+                                  ('throttled=0x4', 'degraded', 'throttled now'),
+                                  ('throttled=0x50000', 'ok', 'under-voltage has occurred, throttling has occurred'),
+                                  ('throttled=0x50005', 'unhealthy', 'under-voltage now, throttled now, under-voltage has occurred, throttling has occurred'),
+                                  ('garbage', 'degraded', 'power status unreadable')):
+            self.throttled, self.mon.slow_at = raw, None
+            p = self.step()['signals']['power']
+            self.assertEqual((p['state'], p['value']), (state, value), raw)
+        self.throttled, self.mon.slow_at = '', None                       # not a Pi
+        self.assertNotIn('power', self.step()['signals'])
+
+    def test_disk(self):
+        for free, state in ((20e9, 'ok'), (900e6, 'degraded'), (50e6, 'unhealthy')):
+            self.free, self.mon.slow_at = free, None
+            self.assertEqual(self.step()['signals']['disk']['state'], state, free)
+        self.free, self.mon.slow_at = 2e9, None                           # plenty of megabytes but under 10 % of the card
+        self.assertEqual(self.step()['signals']['disk']['state'], 'degraded')
+        self.mon.limits.update(disk_warn=5000, disk_critical=3000)       # from linemon.conf
+        self.free, self.mon.slow_at = 4e9, None
+        self.assertEqual(self.step()['signals']['disk']['state'], 'degraded')
+
+    def test_router_capture_problems_are_degraded_never_unhealthy(self):
+        self.mon.args.hook = '/opt/x.py'
+        self.mon.hook_alive = lambda: True
+        self.assertEqual(self.step()['signals']['router_capture']['state'], 'ok')
+        self.mon.hook_failures = 3
+        h = self.step(n=4)
+        self.assertEqual((h['state'], h['signals']['router_capture']['state']), ('degraded', 'degraded'))
+        self.mon.hook_failures, self.mon.hook_alive = 0, lambda: False
+        self.assertEqual(self.step()['signals']['router_capture']['value'], 'the capture thread has stopped')
+        self.assertEqual(self.events(), [])                              # degraded is not written to events.csv
+
+    def test_stopped_is_written_when_the_monitor_stops(self):
+        self.step()
+        self.mon.write_health(self.T0, {}, stopped=True)
+        self.assertEqual(self.health()['state'], 'stopped')
+
+    def test_run_samples_the_health_and_writes_stopped_at_the_end(self):
+        mon = self.mon
+        mon.supervise_every, mon.health_every = 0.05, 0.15
+        mon.discover_hops, mon.log_path = lambda: False, lambda: None
+        mon.probes = lambda: {'gateway': lambda: (True, 1.0, '192.168.1.1')}
+        mon.wall, mon.mono = time.time, time.monotonic                    # the real clocks for this one
+        th = threading.Thread(target=mon.run, daemon=True)
+        th.start()
+        time.sleep(0.9)
+        while_running = self.health()
+        mon.stop.set()
+        th.join(10)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(while_running['state'], 'healthy')
+        self.assertEqual(while_running['signals']['threads']['value'], '2 threads running')  # gateway and maintenance
+        self.assertEqual(self.health()['state'], 'stopped')
+        self.assertEqual([r.split(',')[1:3] for r in self.events()], [['monitor', 'start'], ['monitor', 'stop']])
+
+    def test_health_json_has_nothing_secret_in_it(self):
+        self.mon.args.hook = '/opt/linemon/routers/secret-named-script.py'
+        self.mon.hook_alive = lambda: True
+        self.step()
+        text = open(os.path.join(self.tmp, 'health.json')).read()
+        for forbidden in ('secret', '192.168', self.tmp, 'password'):
+            self.assertNotIn(forbidden, text)
+
+    def test_an_unwritable_health_file_is_not_fatal(self):
+        os.mkdir(os.path.join(self.tmp, 'health.json'))                  # in the way
+        self.mon.health_step(t=self.T0)
+        self.assertIn('cannot write health.json', self.err.getvalue())
+
+    # --- settings
+
+    def test_health_settings_from_linemon_conf(self):
+        conf = os.path.join(self.tmp, 'linemon.conf')
+        open(conf, 'w').write('[health]\nstall = 60\nclock_step = 5\ndisk_warn = 2000\ndisk_critical = 500\n')
+        args, _, _ = linemon.parse_settings(['--config', conf])
+        mon_args = types.SimpleNamespace(**vars(args))
+        self.assertEqual((mon_args.health_stall, mon_args.health_clock_step, mon_args.health_disk_warn), (60, 5.0, 2000))
+        for text, expect in (('[health]\nstall = 1\n', '--health-stall must be at least 5'),
+                             ('[health]\ndisk_warn = 10\ndisk_critical = 20\n', 'must not be below')):
+            open(conf, 'w').write(text)
+            with self.assertRaises(linemon.ConfigError) as cm:
+                linemon.parse_settings(['--config', conf])
+            self.assertIn(expect, str(cm.exception))
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()

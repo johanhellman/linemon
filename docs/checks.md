@@ -184,6 +184,48 @@ couldn't see is unknown, and is reported next to every figure, never counted as 
 
 The reasoning is in [docs/spikes/008-availability.md](spikes/008-availability.md).
 
+## The monitor's own health
+
+A monitor that quietly measures wrongly is worse than none, so every 15 seconds linemon checks
+whether it can trust its own measurements. Each signal is *ok*, *degraded* (worth knowing) or
+*unhealthy* (the measurements can't be trusted). The thresholds are in `linemon.conf` under
+`[health]`.
+
+| Signal | Unhealthy when | Degraded when |
+|---|---|---|
+| `threads` | A probe thread or the maintenance thread has made no progress for `stall` seconds (30, or more if `interval` is large) | |
+| `probe_errors` | A probe raised an error on the Pi in the last minute (see [From probes to outages](#from-probes-to-outages)) | |
+| `writes` | Rows for `events.csv` or `minute.csv` are waiting because a write failed | |
+| `clock` | The wall clock jumped by more than `clock_step` seconds against the monotonic clock, for a minute after; or NTP says *not synchronised* for longer than `ntp_grace` seconds | NTP not synchronised yet, or its state can't be read |
+| `power` | `vcgencmd get_throttled` reports under-voltage now | Throttled, frequency-capped or temperature-limited now. Under-voltage that *has occurred* since boot is shown but doesn't change the state. Not present off a Raspberry Pi. |
+| `disk` | Under `disk_critical` MB free where the data is written | Under `disk_warn` MB, or under 10 % of the disk |
+| `router_capture` | | The capture thread has stopped, or 3 captures in a row reported an error. Only with a capture hook. |
+
+The monitor's own cable has its own check (`link`), so it isn't repeated here.
+
+**State.** The state turns *unhealthy* after 2 bad samples in a row (30 s) and back to *healthy*
+after 4 good ones in a row (60 s), so one odd sample can't flap it.
+
+**What is recorded.** Changes to and from *unhealthy* are written to `events.csv` and fsynced like
+outages: `monitor,unhealthy,,,<reasons>` with the time of the first bad sample, and
+`monitor,healthy,<seconds>,,` with the time of the first good sample of the recovery and how long
+it lasted. The reasons are `probe-stalled`, `probe-error`, `write-failing`, `clock`, `power`, `disk`,
+separated by `;`. *Degraded* is not written there; it shows only in `health.json`. A restart while
+unhealthy leaves the interval open, the same as an outage: the new `start` ends it. Time when the
+monitor was unhealthy is unknown, not up, in the same way as time it wasn't running.
+
+**`health.json`** in the data directory is rewritten atomically every 15 seconds and can be read
+by the web page's unprivileged user. It holds no secrets or paths:
+
+```json
+{"time": "2026-10-02T12:00:45.000+02:00", "state": "unhealthy", "unhealthy_since": "2026-10-02T12:00:30.000+02:00",
+ "reasons": ["probe-stalled"],
+ "signals": {"threads": {"state": "unhealthy", "value": "no progress for 30 s: gateway"}, "disk": {"state": "ok", "value": "20,000 MB free"}}}
+```
+
+`state` is `healthy`, `degraded`, `unhealthy` or, once the monitor has stopped cleanly, `stopped`.
+A `health.json` that is more than a minute old means the monitor isn't running.
+
 ## Router captures
 
 The probes show *where* the path broke from the outside. A router capture adds what the
@@ -281,15 +323,21 @@ time or target.
 |---|---|
 | `time` | For `down`: the first failed probe. For `up`: the first successful probe. Otherwise when it happened. |
 | `target` | `link`, `gateway`, `isp_hop1`, `isp_hop2`, `1.1.1.1`, `8.8.8.8`, `9.9.9.9`, `dns_gateway`, `dns_1.1.1.1`, or `monitor` |
-| `event` | `down` or `up` for targets. `start`, `stop` or `gateway` (router changed) for `monitor`. |
+| `event` | `down` or `up` for targets. `start`, `stop`, `gateway` (router changed), `unhealthy` or `healthy` for `monitor`. |
 | `duration_s` | On `up` rows: seconds since the first failed probe |
-| `detail` | On `down`: the last address that answered. On `up`: the address that answered. On `monitor` rows: the interface and router. |
+| `detail` | On `down`: the last address that answered. On `up`: the address that answered. On `monitor` rows: the interface and router, or for `unhealthy` the reasons ([health](#the-monitors-own-health)). |
 
 ### `minute.csv`
 
 One row per target and minute: `minute`, `target`, `sent`, `lost`, `rtt_avg_ms`,
 `rtt_max_ms`. Round-trip times are empty for the hop targets (a "Time to live exceeded"
 reply carries no round-trip time in `ping`'s output) and the cable check.
+
+### `health.json`
+
+The monitor's current view of its own health, described under [the monitor's own
+health](#the-monitors-own-health). Not a history: the history is the `monitor,unhealthy` and
+`monitor,healthy` rows in `events.csv`.
 
 ### `path.log`
 
