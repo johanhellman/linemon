@@ -43,6 +43,7 @@ import os
 import random
 import re
 import shlex
+import shutil
 import signal
 import socket
 import struct

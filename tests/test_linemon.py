@@ -1319,6 +1319,57 @@ class HealthSignals(unittest.TestCase):
             self.assertIn(expect, str(cm.exception))
 
 
+class RealReaders(unittest.TestCase):
+    """The health readers that the other tests replace must work too: a NameError in one would
+    silently stop the health check (found in review of #57)."""
+
+    def test_the_real_readers_run(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        args = types.SimpleNamespace(iface='eth0', data=tmp, interval=1.0, threshold=3,
+                                     hook=None, hook_during=30, hook_interval=300, hook_timeout=30)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(lambda: [f.close() for f in (mon.events_f, mon.minute_f) if f])
+        free, total = mon.read_disk()
+        self.assertTrue(0 < free <= total)
+        self.assertIsInstance(mon.read_ntp(), str)          # '' where timedatectl doesn't exist
+        self.assertIsInstance(mon.read_throttled(), str)    # '' off a Raspberry Pi
+        signals = mon.collect_signals(time.time(), time.monotonic())   # with nothing replaced
+        self.assertIn('disk', signals)
+        mon.health_step()
+        self.assertTrue(os.path.exists(os.path.join(tmp, 'health.json')))
+
+
+class StaticChecks(unittest.TestCase):
+    def test_no_module_uses_a_name_it_never_defines_or_imports(self):
+        """A cheap stand-in for a linter (the project has no dependencies): names that are loaded but
+        defined nowhere in the file, such as a missing import."""
+        import ast
+        import builtins
+        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', os.path.join('routers', 'zte_livebox.py')):
+            with open(os.path.join(ROOT, name)) as f:
+                tree = ast.parse(f.read())
+            defined = set(dir(builtins))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    defined.update((a.asname or a.name).split('.')[0] for a in node.names)
+                elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    defined.add(node.name)
+                elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                    defined.add(node.id)
+                elif isinstance(node, ast.arg):
+                    defined.add(node.arg)
+                elif isinstance(node, ast.ExceptHandler) and node.name:
+                    defined.add(node.name)
+            used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+            self.assertEqual(sorted(used - defined), [], name)
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()
