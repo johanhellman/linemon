@@ -108,8 +108,10 @@ These show whether name lookups fail together with the rest, or on their own.
   error), the rows are kept in memory and written again by the next 15 second cycle, after
   reopening the file. A row can then appear twice, which the analyzer ignores. If `minute.csv`
   stays unwritable for about a week, the oldest per-minute rows are dropped to protect the
-  memory; events are never dropped. The monitor's threads catch their own errors and are
-  restarted if one ends anyway.
+  memory. Event rows are kept for as long as the monitor runs, but only in memory: if the
+  monitor is stopped or crashes while the disk is still unwritable, the rows still waiting are
+  lost, and it says how many on stderr when it stops cleanly. The monitor's threads catch
+  their own errors and are restarted if one ends anyway.
 - **Cadence:** each target is probed every second. A probe that times out takes about a
   second itself, so during outages the cadence is about 1.1 seconds.
 

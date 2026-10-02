@@ -466,6 +466,14 @@ class Monitor:
             th.join(timeout=5)
         self.flush_minutes(everything=True)
         self.event(now(), 'monitor', 'stop')
+        self.report_unwritten()
+
+    def report_unwritten(self):
+        """Say what was lost, if the monitor stops while a file still can't be written."""
+        with self.lock:
+            if self.pending_events or self.pending_minutes:
+                print(f'linemon: stopping with {len(self.pending_events)} event row(s) and {len(self.pending_minutes)} '
+                      f'minute row(s) that could not be written; they are lost', file=sys.stderr, flush=True)
 
 
 CONFIG_PATH = '/etc/linemon/linemon.conf'
