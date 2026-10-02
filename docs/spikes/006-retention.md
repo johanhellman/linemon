@@ -70,7 +70,11 @@ network, and nothing leaves the Pi unless the user sets it up.
 | Plain `rsync -a` after growth | Resent the whole file, but that is because rsync copies whole files when both ends are local. The delta behaviour over a network was **not** measured. |
 | Prefix of the file rewritten while it also grew, with `--append` | Came out identical in `openrsync`, which may check the existing part. **Inconclusive**; real rsync's `--append` does not check, and `--append-verify` does. |
 
-So: use `--append-verify` (or no append flag, over SSH), never plain `--append`.
+So `--append` and `--append-verify` are for files that **only grow**. Per rsync's manual (not
+run here: `openrsync` lacks `--append-verify`), a file whose copy is the same size or longer is
+skipped in either mode, so a file that got smaller would never be updated. The backup tool has
+to notice that, keep the old copy, and then sync that file without an append flag. Plain
+`--append` is also unsafe because it doesn't check that the part already copied is unchanged.
 
 ### The trim problem
 

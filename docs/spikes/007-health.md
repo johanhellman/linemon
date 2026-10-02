@@ -10,8 +10,10 @@ hung, clock not synchronised, power throttled, disk filling up, cable unplugged?
 ## Answer
 
 Sample a short list of signals every 15 seconds, fold them into **healthy / degraded /
-unhealthy** with a little hysteresis, and record every change in `events.csv`
-(`monitor,unhealthy` and `monitor,healthy`) and in a small `health.json` for the page.
+unhealthy** with a little hysteresis, and record every change to or from unhealthy in
+`events.csv` (`monitor,unhealthy` and `monitor,healthy`). `health.json`, for the page, holds
+the full state including *degraded*, which isn't written to `events.csv` because it doesn't
+change what the figures mean.
 Unhealthy time is **unknown**, handled like the monitor's own cable being down. Before any of
 that, two things in today's monitor must be fixed, because they make it measure wrongly
 without any signal: a local error is recorded as a line outage, and a failed write can end a
@@ -45,7 +47,7 @@ thread leaves a gap that looks like a healthy line.
 | Clock | Wall clock against the monotonic clock every 15 s (a jump over 2 s is a step); `NTPSynchronized` each minute | A step, and for a minute after; not synchronised 10 minutes after boot | NTP state unreadable |
 | Power | `vcgencmd get_throttled`, each minute instead of hourly | Under-voltage now | Throttled or temperature-limited now. "Has occurred since boot" bits are noted, not alarmed. |
 | Disk | `shutil.disk_usage` of the data directory | Under 100 MB free | Under 1 GB or 10 % free |
-| Router capture | Consecutive errors in `captures.jsonl` | | 3 in a row |
+| Router capture | Consecutive errors in `captures.jsonl`, and whether the hook thread is alive | | 3 in a row, or the thread is dead |
 | Own cable | The existing `link` check | Already its own signal; shown, and unknown in the figures | |
 
 For scale, the data grows by about 0.7 MB a day (spike #5), so 1 GB is years away on a
@@ -68,12 +70,16 @@ fake notify socket, ignores a missing or dead socket without an exception, and t
 The design: the main thread, which today only waits, wakes every 10 s as a supervisor. It
 sends `WATCHDOG=1` only if every probe thread and the maintenance thread have a recent
 heartbeat. With `Type=notify` and `WatchdogSec=90`, a hung monitor is killed and restarted
-by systemd. The restart leaves a start row with no stop row, which the analyzer already
+by systemd. The hook thread is deliberately **not** in that condition: it only captures the
+router's status, and restarting the whole monitor for it would cost a gap in the measurements.
+A dead hook thread is a *degraded* signal instead, and the supervisor restarts that thread in
+the process. The restart leaves a start row with no stop row, which the analyzer already
 treats as a crash (#19), so the gap is honest.
 
 ### Showing it
 
-- **`events.csv`:** `monitor,unhealthy,,,<reasons>` when the state turns unhealthy and
+- **`events.csv`:** only changes to and from *unhealthy* are recorded, because those are the
+  ones that change what the figures mean: `monitor,unhealthy,,,<reasons>` when the state turns unhealthy and
   `monitor,healthy,<seconds>,,` when it recovers, both fsynced like outages. Reasons come from
   a fixed list (`probe-stalled`, `probe-error`, `write-failing`, `clock`, `power`). The
   current analyzer ignores unknown `monitor` events, so old tools still read the file; the

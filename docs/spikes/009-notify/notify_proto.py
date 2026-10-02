@@ -11,6 +11,7 @@ import email.message
 import json
 import os
 import smtplib
+import urllib.parse
 import urllib.request
 
 INTERNET_HOSTS = ['1.1.1.1', '8.8.8.8', '9.9.9.9']
@@ -21,9 +22,11 @@ INTERNET_HOSTS = ['1.1.1.1', '8.8.8.8', '9.9.9.9']
 class EventTail:
     def __init__(self, events_path, state_path):
         self.path, self.state_path = events_path, state_path
+        self.saved_tracker = {}
         try:
             with open(state_path) as f:
-                self.offset = json.load(f)['offset']
+                saved = json.load(f)
+            self.offset, self.saved_tracker = saved['offset'], saved.get('tracker', {})
         except (FileNotFoundError, ValueError, KeyError):
             self.offset = None            # first run: start at the end, don't announce history
 
@@ -43,13 +46,15 @@ class EventTail:
                 rows.append(r)
         return rows
 
-    def commit(self):
-        """Call after the notices from poll() are safely in the spool."""
+    def commit(self, tracker):
+        """Call after the notices from poll() are safely in the spool. The open-outage state is saved
+        with the offset: otherwise a restart between the 'down' rows and the 'up' rows would forget the
+        outage and never announce it."""
         if self.offset is not None and hasattr(self, 'pending_offset'):
             self.offset = self.pending_offset
         tmp = self.state_path + '.tmp'
         with open(tmp, 'w') as f:
-            json.dump({'offset': self.offset}, f)
+            json.dump({'offset': self.offset, 'tracker': tracker.save()}, f)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.state_path)
@@ -58,8 +63,13 @@ class EventTail:
 # ---- outages from events: all three internet hosts down -> one outage --------------------
 
 class OutageTracker:
-    def __init__(self):
-        self.down, self.since = set(), None
+    def __init__(self, saved=None):
+        saved = saved or {}
+        self.down = set(saved.get('down', []))
+        self.since = dt.datetime.fromisoformat(saved['since']) if saved.get('since') else None
+
+    def save(self):
+        return {'down': sorted(self.down), 'since': self.since.isoformat() if self.since else None}
 
     def feed(self, row):
         """Yield ('down', time) or ('up', time, seconds) when the internet goes down or comes back."""
@@ -85,8 +95,17 @@ class Spool:
         self.path = path
 
     def add(self, notice):
+        prefix = b''
+        try:
+            with open(self.path, 'rb') as r:
+                if r.seek(0, os.SEEK_END):
+                    r.seek(-1, os.SEEK_END)
+                    if r.read(1) != b'\n':
+                        prefix = b'\n'    # a power cut left a half-written line: end it, don't glue the notice on
+        except FileNotFoundError:
+            pass
         with open(self.path, 'ab') as f:
-            f.write((json.dumps(notice) + '\n').encode())
+            f.write(prefix + (json.dumps(notice) + '\n').encode())
             f.flush()
             os.fsync(f.fileno())
 
@@ -147,7 +166,19 @@ def in_quiet_hours(local_time, start='23:00', end='07:00'):
 
 # ---- channels: each builds a request we can check against a fake server -----------------
 
+LOOPBACK = ('127.0.0.1', 'localhost', '::1')
+
+
+def require_tls(url, what):
+    """Credentials never travel in the clear: https is required, except to this machine (tests)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != 'https' and parts.hostname not in LOOPBACK:
+        raise ValueError(f'{what} must be sent over https, not {parts.scheme}')
+
+
 def send_ntfy(url, topic, title, body, token=None, timeout=10):
+    if token:
+        require_tls(url, 'the ntfy token')
     req = urllib.request.Request(f'{url.rstrip("/")}/{topic}', data=body.encode(), method='POST',
                                  headers={'Title': title, 'Tags': 'warning'})
     if token:
@@ -156,6 +187,7 @@ def send_ntfy(url, topic, title, body, token=None, timeout=10):
 
 
 def send_telegram(api_base, token, chat_id, text, timeout=10):
+    require_tls(api_base, 'the bot token (it is part of the URL)')
     req = urllib.request.Request(f'{api_base.rstrip("/")}/bot{token}/sendMessage', method='POST',
                                  data=json.dumps({'chat_id': chat_id, 'text': text}).encode(),
                                  headers={'Content-Type': 'application/json'})
@@ -163,6 +195,8 @@ def send_telegram(api_base, token, chat_id, text, timeout=10):
 
 
 def send_email(host, port, sender, to, subject, body, user=None, password=None, starttls=False, timeout=10):
+    if user and not starttls and host not in LOOPBACK:
+        raise ValueError('SMTP login needs STARTTLS')
     msg = email.message.EmailMessage()
     msg['From'], msg['To'], msg['Subject'] = sender, to, subject
     msg.set_content(body)
