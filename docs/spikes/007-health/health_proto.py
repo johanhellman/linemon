@@ -86,7 +86,12 @@ if __name__ == '__main__':
     assert sd_notify('READY=1', path) and server.recv(64) == b'READY=1'
     assert sd_notify('WATCHDOG=1', path) and server.recv(64) == b'WATCHDOG=1'
     assert sd_notify('WATCHDOG=1', path + 'x') is False            # nobody listening: no exception
-    assert sd_notify('WATCHDOG=1', None) is False                   # no NOTIFY_SOCKET: nothing to do
+    saved = os.environ.pop('NOTIFY_SOCKET', None)                  # run under systemd? don't use its socket here
+    try:
+        assert sd_notify('WATCHDOG=1', None) is False               # no NOTIFY_SOCKET: nothing to do
+    finally:
+        if saved is not None:
+            os.environ['NOTIFY_SOCKET'] = saved
     t = time.perf_counter()
     for _ in range(1000):
         sd_notify('WATCHDOG=1', path)

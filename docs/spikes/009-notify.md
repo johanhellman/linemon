@@ -23,15 +23,17 @@ backup-link spike (#13).
 
 A throwaway prototype (`docs/spikes/009-notify/notify_proto.py`, run with
 `test_scenarios.py`) on a Mac, Python 3.14. **Everything ran against fake servers on
-localhost; nothing was sent to ntfy, Telegram or any mail provider**, so the reliability of
+127.0.0.1; nothing left the machine and nothing was sent to ntfy, Telegram or any mail provider**, so the reliability of
 those services, rate limits and delivery delays are not tested.
 
 | Check | Result |
 |---|---|
 | ntfy, Telegram and email requests, built with `urllib` and `smtplib` | Correct headers, JSON body and message against fake servers |
-| Send to an unreachable address with `timeout=2` | Gave up after 2.0 s, no longer |
+| Send to a local server that never answers, with `timeout=2` | Gave up after 2.0 s, no longer |
 | 5 outages in 20 minutes while sending fails, with a restart in the middle | None lost, none repeated. One message after the line returned: "5 internet outages between 14:00 and 14:16, 3 min down in total." |
-| An outage still in progress | Not announced as finished |
+| An outage still in progress | Not announced as finished, and still announced once it ends if the notifier restarted while it was open (the open-outage state is saved with the offset) |
+| A power cut leaves a half-written spool line | The line is skipped and the next notices are kept (the spool ends it before appending) |
+| A token or login over plain `http`, or an SMTP login without STARTTLS | Refused before any connection is made |
 | Quiet hours 23:00 to 07:00 | Work across midnight and inside a day |
 
 What is **not** shown by this: real DNS failure. `socket.getaddrinfo` ignores a socket's
@@ -48,8 +50,9 @@ tails that file needs nothing from the monitor:
   notifier. Today's monitor has no thread supervision (spike #7), so adding sending threads to
   it would add exactly the failure that spike warns about.
 - **Durable by design.** The notifier remembers how far it has read (an offset, written
-  atomically) and keeps unsent notices in a spool, one fsynced JSON line each. A cut-short
-  last line is skipped. Delivery is at-least-once: after a crash between sending and
+  atomically) together with which outage is currently open, so a restart in the middle of an
+  outage still announces it. Unsent notices wait in a spool, one fsynced JSON line each; a
+  cut-short last line is ended before the next append, so it can't swallow a notice. Delivery is at-least-once: after a crash between sending and
   clearing, one notice can be sent twice, which is better than none.
 - **Replaceable.** A user who wants a different tool can read `events.csv` themselves.
 
@@ -81,6 +84,10 @@ which doesn't matter for this.
 
 ## Fit with the principles
 
+- **Credentials only over TLS (7):** an ntfy token needs `https`, a Telegram bot token is part
+  of the URL so it needs `https` too, and an SMTP login needs STARTTLS (or SMTPS). Anything
+  else is refused. A receiver on the local network that needs no secret may use plain HTTP,
+  and the config says so explicitly. Certificates are checked.
 - **Private by default (7):** off unless configured. Messages say what and when ("Internet
   was down for 3 min"), and leave out addresses and names unless the user adds them.
 - **Observe, don't interfere (5):** sending is light and happens after the fact. It must not

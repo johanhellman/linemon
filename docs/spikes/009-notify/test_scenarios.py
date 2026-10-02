@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spike #9: run the prototype against fake servers. Nothing leaves this machine."""
+"""Spike #9: run the prototype against fake servers, all on 127.0.0.1. Nothing leaves this machine."""
 import datetime as dt
 import json
 import os
@@ -69,14 +69,20 @@ assert 'Subject: Internet down' in SMTP.mails[0] and 'Down since 14:02' in SMTP.
 print('1. ntfy, Telegram and email requests are built correctly with the standard library')
 Fake.log.clear()
 
-# ---- 2. a timeout on an unreachable address costs what we set, not more ------------------
+# ---- 2. a send to a server that never answers costs what we set, not more ---------------
+class Stall(BaseHTTPRequestHandler):
+    def do_POST(self):
+        time.sleep(6)                              # longer than the timeout below
+    def log_message(self, *a): pass
+
+stall = serve(Stall)
 t = time.perf_counter()
 try:
-    n.send_ntfy('http://192.0.2.1', 'x', 't', 'b', timeout=2)
-except (urllib.error.URLError, OSError, TimeoutError) as e:
+    n.send_ntfy(f'http://127.0.0.1:{stall.server_port}', 'x', 't', 'b', timeout=2)
+except (urllib.error.URLError, OSError, TimeoutError):
     pass
 elapsed = time.perf_counter() - t
-print(f'2. send to an unreachable address with timeout=2 gave up after {elapsed:.1f} s')
+print(f'2. a send to a local server that never answers, with timeout=2, gave up after {elapsed:.1f} s')
 assert 1.5 < elapsed < 4
 
 # ---- 3. five outages in 20 minutes while the line is down; a restart; recovery -----------
@@ -85,7 +91,7 @@ events, state, spool_path = (os.path.join(d, x) for x in ('events.csv', 'tail.js
 open(events, 'w').write('time,target,event,duration_s,detail\r\n')
 tail, spool, tracker = n.EventTail(events, state), n.Spool(spool_path), n.OutageTracker()
 assert tail.poll() == []                           # first run starts at the end
-tail.commit()
+tail.commit(tracker)
 
 def write(offset_s, kind, hosts=n.INTERNET_HOSTS):
     with open(events, 'a', newline='') as f:
@@ -94,23 +100,32 @@ def write(offset_s, kind, hosts=n.INTERNET_HOSTS):
 
 def pump():
     """One cycle of the notifier: read new events, spool completed outages."""
-    global tail, tracker
     for row in tail.poll():
         for ev in tracker.feed(row):
             if ev[0] == 'up':
                 spool.add({'start': (ev[1] - dt.timedelta(seconds=ev[2])).isoformat(), 'at': ev[1].timestamp(), 'seconds': ev[2]})
-    tail.commit()
+    tail.commit(tracker)
 
 for i in range(5):                                  # outages of 40 s, every 4 minutes
     write(i * 240, 'down'); write(i * 240 + 40, 'up')
 pump()
 assert len(spool.pending()) == 5
-# restart in the middle: new objects, state from disk
-tail, tracker = n.EventTail(events, state), n.OutageTracker()
+def restart():
+    """A new process: everything comes back from disk."""
+    global tail, tracker
+    tail = n.EventTail(events, state)
+    tracker = n.OutageTracker(tail.saved_tracker)
+
+restart()
 write(1300, 'down')                                 # a sixth outage starts and is still going
 pump()
 assert len(spool.pending()) == 5, 'an outage in progress must not be announced as finished'
-print('3a. 5 outages spooled; a restart in the middle lost and repeated nothing')
+restart()                                           # restart while it is still down...
+write(1340, 'up')                                   # ...and it ends afterwards
+pump()
+assert len(spool.pending()) == 6, 'the outage open across a restart must still be announced'
+spool.replace(spool.pending()[:5])                  # keep the demo at 5 notices
+print('3a. 5 outages spooled; a restart between the down and the up rows lost and repeated nothing')
 
 last = max(x['at'] for x in spool.pending())
 Fake.line_up = False
@@ -133,4 +148,25 @@ at = lambda h, m: T0.replace(hour=h, minute=m)
 assert n.in_quiet_hours(at(23, 30)) and n.in_quiet_hours(at(2, 0)) and not n.in_quiet_hours(at(7, 0)) and not n.in_quiet_hours(at(14, 0))
 assert n.in_quiet_hours(at(13, 0), '12:00', '14:00') and not n.in_quiet_hours(at(15, 0), '12:00', '14:00')
 print('4. quiet hours work across midnight and inside a day')
+
+# ---- 5. a power cut leaves a half-written spool line: the next notice must survive -------
+torn = os.path.join(d, 'torn.jsonl')
+open(torn, 'wb').write(json.dumps({'a': 1}).encode() + b'\n' + b'{"start": "2026-10-0')
+ts = n.Spool(torn)
+ts.add({'b': 2})
+assert ts.pending() == [{'a': 1}, {'b': 2}]
+ts.add({'c': 3})
+assert ts.pending() == [{'a': 1}, {'b': 2}, {'c': 3}]
+print('5. a half-written spool line is skipped and the next notices are kept')
+
+# ---- 6. credentials only go over TLS ------------------------------------------------------
+for call in (lambda: n.send_ntfy('http://ntfy.example.invalid', 't', 'x', 'y', token='secret'),
+             lambda: n.send_telegram('http://api.example.invalid', '123:DEMO', '1', 'y'),
+             lambda: n.send_email('smtp.example.invalid', 25, 'a@example.invalid', 'b@example.invalid', 's', 'b', user='u', password='p')):
+    try:
+        call()
+        raise SystemExit('a credential was about to be sent in the clear')
+    except ValueError:
+        pass                                       # refused before any connection was made
+print('6. a token or login is refused over plain http or without STARTTLS')
 print('all scenarios passed')
