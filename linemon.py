@@ -49,8 +49,12 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 INTERNET_HOSTS = ['1.1.1.1', '8.8.8.8', '9.9.9.9']
+EVENTS_HEADER = ['time', 'target', 'event', 'duration_s', 'detail']
+MINUTE_HEADER = ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms']
+MAX_PENDING_MINUTES = 100000  # about a week of per-minute rows kept in memory if minute.csv can't be written
 TRACE_TARGET = '1.1.1.1'
 SO_BINDTODEVICE = getattr(socket, 'SO_BINDTODEVICE', 25)
 
@@ -150,10 +154,14 @@ class Monitor:
         self.hops = {}  # 'isp_hop1' -> (ttl, responder)
         self.stats = {}  # (minute, target) -> [sent, lost, rtt_sum, rtt_n, rtt_max]
         self.down = {}  # target -> currently declared down
+        self.target_state = {}  # target -> consecutive failures, first failure, down?, last responder
+        self.probe_errors = {}  # target -> probes that raised an error on this machine
+        self.pending_events = []   # rows that couldn't be written yet: kept and retried, never dropped
+        self.pending_minutes = []
+        self.warned = {}
         os.makedirs(args.data, exist_ok=True)
-        self.events_f, self.events = self._open_csv('events.csv', ['time', 'target', 'event', 'duration_s', 'detail'])
-        self.minute_f, self.minute = self._open_csv(
-            'minute.csv', ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms'])
+        self.events_f, self.events = self._open_csv('events.csv', EVENTS_HEADER)
+        self.minute_f, self.minute = self._open_csv('minute.csv', MINUTE_HEADER)
 
     def _open_csv(self, name, header):
         path = os.path.join(self.args.data, name)
@@ -170,11 +178,47 @@ class Monitor:
             os.fsync(f.fileno())
         return f, w
 
+    def warn(self, key, message, every=60):
+        """Say something on stderr (the systemd journal), at most once per `every` seconds per key."""
+        t = time.monotonic()
+        if t - self.warned.get(key, -every) >= every:
+            self.warned[key] = t
+            print(f'linemon: {message}', file=sys.stderr, flush=True)
+
+    def _drop_file(self, f):
+        try:
+            f.close()
+        except (OSError, ValueError):
+            pass
+
     def event(self, t, target, kind, duration='', detail=''):
+        """Write a row to events.csv, flushed and fsynced. If that fails (disk full, I/O error) the
+        row stays queued and is retried, so an outage isn't lost if the disk recovers."""
         with self.lock:
-            self.events.writerow([iso(t), target, kind, duration, detail])
-            self.events_f.flush()
-            os.fsync(self.events_f.fileno())
+            self.pending_events.append([iso(t), target, kind, duration, detail])
+            self._write_events()
+
+    def retry_events(self):
+        with self.lock:
+            if self.pending_events:
+                self._write_events()
+
+    def _write_events(self):  # called with the lock held
+        try:
+            if self.events_f is None:
+                self.events_f, self.events = self._open_csv('events.csv', EVENTS_HEADER)
+            while self.pending_events:
+                self.events.writerow(self.pending_events[0])
+                self.events_f.flush()
+                os.fsync(self.events_f.fileno())
+                self.pending_events.pop(0)
+        except OSError as e:
+            # Don't trust the file object after an error, and don't retry only the fsync: after a failed
+            # fsync the kernel may have dropped the data. Reopen and write the row again; at worst it is
+            # in the file twice, which the analyzer ignores.
+            self.warn('events', f'cannot write events.csv ({e}); {len(self.pending_events)} row(s) kept, will retry')
+            self._drop_file(self.events_f)
+            self.events_f = None
 
     def record(self, t, target, ok, rtt):
         key = (t.replace(second=0, microsecond=0).isoformat(), target)
@@ -196,8 +240,23 @@ class Monitor:
                 sent, lost, rtt_sum, rtt_n, rtt_max = self.stats.pop(key)
                 avg = f'{rtt_sum / rtt_n:.1f}' if rtt_n else ''
                 mx = f'{rtt_max:.1f}' if rtt_n else ''
-                self.minute.writerow([key[0], key[1], sent, lost, avg, mx])
-            self.minute_f.flush()
+                self.pending_minutes.append([key[0], key[1], sent, lost, avg, mx])
+            if len(self.pending_minutes) > MAX_PENDING_MINUTES:  # a disk that stays broken must not eat the memory
+                dropped = len(self.pending_minutes) - MAX_PENDING_MINUTES
+                del self.pending_minutes[:dropped]
+                self.warn('minute-drop', f'minute.csv still not writable: dropped the {dropped} oldest per-minute row(s)')
+            try:
+                if self.minute_f is None:
+                    self.minute_f, self.minute = self._open_csv('minute.csv', MINUTE_HEADER)
+                rows = list(self.pending_minutes)
+                for row in rows:
+                    self.minute.writerow(row)
+                self.minute_f.flush()
+                del self.pending_minutes[:len(rows)]
+            except OSError as e:
+                self.warn('minute', f'cannot write minute.csv ({e}); {len(self.pending_minutes)} row(s) kept, will retry')
+                self._drop_file(self.minute_f)
+                self.minute_f = None
 
     def run_hook(self, reason):
         """Run --hook and append its JSON result to captures.jsonl."""
@@ -253,7 +312,10 @@ class Monitor:
             else:
                 continue
             was_down = down
-            self.run_hook(reason)
+            try:
+                self.run_hook(reason)
+            except Exception:
+                self.warn('hook', f'router capture failed unexpectedly:\n{traceback.format_exc()}')
             last_run = time.monotonic()
 
     def discover_hops(self):
@@ -308,66 +370,98 @@ class Monitor:
         return targets
 
     def run_target(self, name, probe):
-        fails, first_fail, down, last_ok = 0, None, False, ''
         next_t = time.monotonic() + random.random()
         while not self.stop.is_set():
             self.stop.wait(max(0.0, next_t - time.monotonic()))
             if self.stop.is_set():
                 break
             next_t = max(next_t + self.args.interval, time.monotonic())
-            t = now()
             try:
-                result = probe()
-            except Exception:
-                result = (False, None, None)
-            if result is None:
-                continue
-            ok, rtt, who = result
-            self.record(t, name, ok, rtt)
-            if ok:
-                if down:
-                    self.event(t, name, 'up', f'{(t - first_fail).total_seconds():.0f}', who or '')
-                fails, first_fail, down, last_ok = 0, None, False, who or ''
-            else:
-                fails += 1
-                if fails == 1:
-                    first_fail = t
-                if fails == self.args.threshold:
-                    down = True
-                    self.event(first_fail, name, 'down', '', last_ok)
-            self.down[name] = down
+                self.probe_once(name, probe)
+            except Exception:  # whatever goes wrong, this target keeps being probed
+                self.warn(('target', name), f'{name}: unexpected error:\n{traceback.format_exc()}')
+
+    def probe_once(self, name, probe):
+        st = self.target_state.setdefault(name, {'fails': 0, 'first_fail': None, 'down': False, 'last_ok': ''})
+        t = now()
+        try:
+            result = probe()
+        except Exception:
+            # An error on this machine (out of file descriptors, a bug) says nothing about the line:
+            # it is not a failed probe. Skip it, like a hop that isn't discovered yet, and count it.
+            self.probe_errors[name] = self.probe_errors.get(name, 0) + 1
+            self.warn(('probe', name), f'{name}: the probe raised an error; not counted as a failure:\n{traceback.format_exc()}')
+            return
+        if result is None:
+            return
+        ok, rtt, who = result
+        self.record(t, name, ok, rtt)
+        if ok:
+            if st['down']:
+                self.event(t, name, 'up', f'{(t - st["first_fail"]).total_seconds():.0f}', who or '')
+            st.update(fails=0, first_fail=None, down=False, last_ok=who or '')
+        else:
+            st['fails'] += 1
+            if st['fails'] == 1:
+                st['first_fail'] = t
+            if st['fails'] == self.args.threshold:
+                st['down'] = True
+                self.event(st['first_fail'], name, 'down', '', st['last_ok'])
+        self.down[name] = st['down']
+
+    def restart_dead(self, threads, specs):
+        """Start again any thread that has ended. The loops catch their own errors, so this is a safety
+        net: a thread that is gone would leave a target silently unmonitored. Returns how many."""
+        restarted = 0
+        for i, th in enumerate(threads):
+            if not th.is_alive() and not self.stop.is_set():
+                fn, args = specs[i]
+                self.warn(('dead', i), f'thread for {args[0] if args else fn.__name__} ended unexpectedly; restarting it')
+                threads[i] = threading.Thread(target=fn, args=args, daemon=True)
+                threads[i].start()
+                restarted += 1
+        return restarted
 
     def maintenance(self):
         last_path = time.monotonic()
         while not self.stop.wait(15):
-            self.flush_minutes()
-            gateway = default_gateway(self.iface)
-            if gateway and gateway != self.gateway:
-                # Pi moved to another router (e.g. installed behind the UDM, then
-                # plugged into the Livebox): the old hops no longer apply.
-                self.event(now(), 'monitor', 'gateway', '', f'{self.gateway} -> {gateway}')
-                self.gateway, self.hops = gateway, {}
-            if not self.hops:
-                if self.discover_hops():  # retried every 15 s until the path is known
-                    self.log_path()
-                    last_path = time.monotonic()
-            elif time.monotonic() - last_path >= 3600:
-                self.discover_hops()
+            try:
+                last_path = self.maintain(last_path)
+            except Exception:  # the writer of minute.csv must not stop because one cycle went wrong
+                self.warn('maintenance', f'maintenance cycle failed:\n{traceback.format_exc()}')
+
+    def maintain(self, last_path):
+        """One 15 second cycle; returns when the path was last logged."""
+        self.retry_events()
+        self.flush_minutes()
+        gateway = default_gateway(self.iface)
+        if gateway and gateway != self.gateway:
+            # Pi moved to another router (e.g. installed behind the UDM, then
+            # plugged into the Livebox): the old hops no longer apply.
+            self.event(now(), 'monitor', 'gateway', '', f'{self.gateway} -> {gateway}')
+            self.gateway, self.hops = gateway, {}
+        if not self.hops:
+            if self.discover_hops():  # retried every 15 s until the path is known
                 self.log_path()
-                last_path = time.monotonic()
+                return time.monotonic()
+        elif time.monotonic() - last_path >= 3600:
+            self.discover_hops()
+            self.log_path()
+            return time.monotonic()
+        return last_path
 
     def run(self):
         self.discover_hops()
         self.log_path()
         self.event(now(), 'monitor', 'start', '', f'iface={self.iface} gateway={self.gateway}')
-        threads = [threading.Thread(target=self.run_target, args=(n, p), daemon=True)
-                   for n, p in self.probes().items()]
-        threads.append(threading.Thread(target=self.maintenance, daemon=True))
+        specs = [(self.run_target, (n, p)) for n, p in self.probes().items()] + [(self.maintenance, ())]
         if self.args.hook:
-            threads.append(threading.Thread(target=self.hook_loop, daemon=True))
+            specs.append((self.hook_loop, ()))
+        threads = [threading.Thread(target=fn, args=args, daemon=True) for fn, args in specs]
         for th in threads:
             th.start()
-        self.stop.wait()
+        while not self.stop.wait(10):  # the main thread watches the others
+            self.restart_dead(threads, specs)
         for th in threads:
             th.join(timeout=5)
         self.flush_minutes(everything=True)

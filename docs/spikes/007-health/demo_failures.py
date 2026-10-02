@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Spike #7 (not product code): show how today's Monitor behaves when things go wrong locally."""
+"""Spike #7 (not product code): show how the Monitor behaves when things go wrong locally.
+
+Written against the monitor as it was when the spike ran, where case 1 wrote a false outage and
+case 2 ended the thread and lost the outage. Fixed by #39 and #40; run it to see the monitor now.
+"""
 import errno
 import os
 import sys
@@ -39,7 +43,8 @@ def run(label, probe, patch=None):
     mon.stop.set()
     th.join(1)
     print(f'{label}\n  thread alive after 2 s: {alive}\n  events.csv: {read_events(tmp) or "(empty)"}\n'
-          f'  mon.down: {mon.down}\n')
+          f'  mon.down: {mon.down}  probe errors: {getattr(mon, "probe_errors", "n/a")}  '
+          f'pending rows: {len(getattr(mon, "pending_events", []))}\n')
 
 
 # 1. the probe itself raises (here EMFILE, "too many open files": a local problem, not the line's)
@@ -51,8 +56,9 @@ run('1. probe raises a local error (EMFILE)', broken_probe)
 
 # 2. the probe fails three times (a real outage) but the disk is full when the down row is written
 def disk_full(mon):
-    def event(*a, **k):
+    def fsync(fd):
         raise OSError(errno.ENOSPC, 'No space left on device')
-    mon.event = event
+    os.fsync = fsync
 
 run('2. a real outage, but writing the event fails (ENOSPC)', lambda: (False, None, None), disk_full)
+print('(pending rows are kept in memory and written when the disk allows)')
