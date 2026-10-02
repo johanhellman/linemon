@@ -17,6 +17,7 @@ outage survives a crash or power cut. Output in --data:
   events.csv   one row per down/up transition, plus monitor start/stop
   minute.csv   per target and minute: probes sent, lost, average and max RTT
   path.log     discovered hops, NTP sync and power status (start and hourly)
+  health.json  whether the monitor trusts its own measurements right now (every 15 s)
   captures.jsonl  output of the --hook command, if one is set (see below)
 
 With --hook, a command (e.g. routers/zte_livebox.py) is run to capture what the
@@ -54,6 +55,7 @@ import traceback
 INTERNET_HOSTS = ['1.1.1.1', '8.8.8.8', '9.9.9.9']
 EVENTS_HEADER = ['time', 'target', 'event', 'duration_s', 'detail']
 MINUTE_HEADER = ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms']
+HEALTH_FILE = 'health.json'
 MAX_PENDING_MINUTES = 100000  # about a week of per-minute rows kept in memory if minute.csv can't be written
 TRACE_TARGET = '1.1.1.1'
 SO_BINDTODEVICE = getattr(socket, 'SO_BINDTODEVICE', 25)
@@ -144,6 +146,59 @@ def ends_with_newline(path):
         return f.read(1) == b'\n'
 
 
+THROTTLE_BITS = {  # `vcgencmd get_throttled`, per the Raspberry Pi documentation
+    0: ('under-voltage now', 'unhealthy'), 1: ('arm frequency capped now', 'degraded'),
+    2: ('throttled now', 'degraded'), 3: ('soft temperature limit now', 'degraded'),
+    16: ('under-voltage has occurred', 'note'), 17: ('frequency capping has occurred', 'note'),
+    18: ('throttling has occurred', 'note'), 19: ('soft temperature limit has occurred', 'note'),
+}
+
+
+def decode_throttled(text):
+    """'throttled=0x50005' -> [(description, severity)]. Empty output (not a Pi) gives None."""
+    text = text.strip()
+    if not text:
+        return None
+    try:
+        value = int(text.split('=')[1], 16)
+    except (IndexError, ValueError):
+        return [('power status unreadable', 'degraded')]
+    return [info for bit, info in THROTTLE_BITS.items() if value >> bit & 1]
+
+
+class Health:
+    """Healthy or unhealthy, with hysteresis so one odd sample can't flap it: unhealthy after 2 bad
+    samples in a row, healthy again after 4 good ones. update() returns the change, if any, with the
+    time it really began: the first bad sample, or the first of the good ones."""
+    BAD, GOOD = 2, 4
+
+    def __init__(self):
+        self.state, self.run, self.mark, self.since, self.reasons = 'healthy', 0, None, None, set()
+
+    def update(self, reasons, t):
+        bad = bool(reasons)
+        if self.state == 'healthy':
+            self.run = self.run + 1 if bad else 0
+            if bad:
+                self.mark = t if self.run == 1 else self.mark
+                self.reasons |= set(reasons)
+            else:
+                self.reasons = set()
+            if self.run >= self.BAD:
+                self.state, self.run, self.since = 'unhealthy', 0, self.mark
+                return 'unhealthy', self.since, '', ';'.join(sorted(self.reasons))
+        else:
+            self.reasons |= set(reasons)
+            self.run = 0 if bad else self.run + 1
+            if not bad and self.run == 1:
+                self.mark = t
+            if self.run >= self.GOOD:
+                began, self.state, self.run = self.since, 'healthy', 0
+                self.since, self.reasons = None, set()
+                return 'healthy', self.mark, f'{(self.mark - began).total_seconds():.0f}', ''
+        return None
+
+
 class Monitor:
     def __init__(self, args):
         self.args = args
@@ -159,6 +214,18 @@ class Monitor:
         self.pending_events = []   # rows that couldn't be written yet: kept and retried, never dropped
         self.pending_minutes = []
         self.warned = {}
+        # health: what the monitor can see of itself (see sample_health)
+        self.health = Health()
+        self.supervise_every, self.health_every = 5.0, 15.0  # seconds; shortened by tests
+        self.limits = {k: getattr(args, f'health_{k}', d) for k, d in HEALTH_DEFAULTS.items()}
+        self.wall, self.mono = time.time, time.monotonic  # replaced by tests
+        self.beats = {}  # thread name -> monotonic time of its last pass through its loop
+        self.probe_error_times = []
+        self.hook_failures = 0  # consecutive router captures that reported an error
+        self.threads, self.hook_index = [], None
+        self.clock_ref, self.clock_bad_until, self.clock_note = None, 0.0, ''
+        self.slow_at, self.slow = None, {}  # readings that cost a process: refreshed once a minute
+        self.unsynced_since = None
         os.makedirs(args.data, exist_ok=True)
         self.events_f, self.events = self._open_csv('events.csv', EVENTS_HEADER)
         self.minute_f, self.minute = self._open_csv('minute.csv', MINUTE_HEADER)
@@ -284,6 +351,7 @@ class Monitor:
         except Exception as e:
             print(f'hook {reason}: {e!r}', file=sys.stderr, flush=True)
             result = {'error': 'capture script could not be run; see journalctl -u linemon'}
+        self.hook_failures = self.hook_failures + 1 if 'error' in result else 0
         if os.listdir(capture_dir):
             result['files'] = os.path.relpath(capture_dir, self.args.data)
         else:
@@ -299,6 +367,7 @@ class Monitor:
         was_down = False
         last_run = time.monotonic()  # the first periodic capture comes one interval after start
         while not self.stop.wait(1):
+            self.beats['hook'] = self.mono()
             down = all(self.down.get(h) for h in INTERNET_HOSTS)
             elapsed = time.monotonic() - last_run
             if down and not was_down:
@@ -376,6 +445,7 @@ class Monitor:
             if self.stop.is_set():
                 break
             next_t = max(next_t + self.args.interval, time.monotonic())
+            self.beats[name] = self.mono()
             try:
                 self.probe_once(name, probe)
             except Exception:  # whatever goes wrong, this target keeps being probed
@@ -390,6 +460,7 @@ class Monitor:
             # An error on this machine (out of file descriptors, a bug) says nothing about the line:
             # it is not a failed probe. Skip it, like a hop that isn't discovered yet, and count it.
             self.probe_errors[name] = self.probe_errors.get(name, 0) + 1
+            self.probe_error_times.append(self.mono())
             self.warn(('probe', name), f'{name}: the probe raised an error; not counted as a failure:\n{traceback.format_exc()}')
             return
         if result is None:
@@ -409,6 +480,130 @@ class Monitor:
                 self.event(st['first_fail'], name, 'down', '', st['last_ok'])
         self.down[name] = st['down']
 
+    # ---- health ---------------------------------------------------------------------------------
+
+    def read_ntp(self):
+        return sh(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value']).strip()
+
+    def read_throttled(self):
+        return sh(['vcgencmd', 'get_throttled']).strip()
+
+    def read_disk(self):
+        usage = shutil.disk_usage(self.args.data)
+        return usage.free, usage.total
+
+    def hook_alive(self):
+        return self.hook_index is None or self.threads[self.hook_index].is_alive()
+
+    def collect_signals(self, wall, mono):
+        """Every signal as name -> (severity, value, reason). Severity is 'ok', 'degraded' (worth
+        knowing) or 'unhealthy' (measurements can't be trusted); reason is from a fixed list."""
+        lim, sig = self.limits, {}
+
+        # threads that have stopped making progress (a probe takes about a second, even in an outage)
+        stall = max(lim['stall'], 3 * self.args.interval + 5)
+        workers = {n: b for n, b in self.beats.items() if n != 'hook'}
+        stalled = sorted(n for n, b in workers.items() if mono - b > stall)
+        sig['threads'] = (('unhealthy', f'no progress for {stall:g} s: {", ".join(stalled)}', 'probe-stalled') if stalled
+                          else ('ok', f'{len(workers)} threads running', None))
+
+        # errors on this machine while probing (not failed probes)
+        self.probe_error_times = [t for t in self.probe_error_times if mono - t < 60]
+        n = len(self.probe_error_times)
+        sig['probe_errors'] = (('unhealthy', f'{n} in the last minute', 'probe-error') if n
+                               else ('ok', 'none in the last minute', None))
+
+        # files that can't be written
+        waiting = len(self.pending_events) + len(self.pending_minutes)
+        sig['writes'] = (('unhealthy', f'{waiting} row(s) waiting to be written', 'write-failing') if waiting
+                         else ('ok', 'ok', None))
+
+        # the clock: a jump of the wall clock against the monotonic one, and NTP
+        if self.clock_ref is not None:
+            jump = (wall - self.clock_ref[0]) - (mono - self.clock_ref[1])
+            if abs(jump) > lim['clock_step']:
+                self.clock_bad_until, self.clock_note = mono + 60, f'stepped by {jump:+.0f} s'
+                self.warn('clock', f'the clock {self.clock_note}: timestamps around it are unreliable')
+        self.clock_ref = (wall, mono)
+        if self.slow_at is None or mono - self.slow_at >= 60:
+            self.slow_at = mono
+            self.slow = {'ntp': self.read_ntp(), 'throttled': self.read_throttled()}
+            try:
+                self.slow['disk'] = self.read_disk()
+            except OSError:
+                self.slow['disk'] = None
+        ntp = self.slow['ntp']
+        self.unsynced_since = (self.unsynced_since if self.unsynced_since is not None else mono) if ntp == 'no' else None
+        if mono < self.clock_bad_until:
+            sig['clock'] = ('unhealthy', f'{self.clock_note}', 'clock')
+        elif self.unsynced_since is not None and mono - self.unsynced_since > lim['ntp_grace']:
+            sig['clock'] = ('unhealthy', f'not synchronised for {(mono - self.unsynced_since) / 60:.0f} min', 'clock')
+        elif ntp == 'no':
+            sig['clock'] = ('degraded', 'not synchronised yet', None)
+        elif ntp == 'yes':
+            sig['clock'] = ('ok', 'synchronised', None)
+        else:
+            sig['clock'] = ('degraded', 'synchronisation state unreadable', None)
+
+        # power and temperature on a Raspberry Pi (nothing to report elsewhere)
+        flags = decode_throttled(self.slow['throttled'])
+        if flags is not None:
+            severities = {sev for _, sev in flags}
+            text = ', '.join(d for d, _ in flags) or 'ok'
+            sig['power'] = (('unhealthy', text, 'power') if 'unhealthy' in severities
+                            else ('degraded', text, None) if 'degraded' in severities else ('ok', text, None))
+
+        # free space where the data is written
+        if self.slow['disk']:
+            free, total = self.slow['disk']
+            mb = free / 1e6
+            text = f'{mb:,.0f} MB free'
+            sig['disk'] = (('unhealthy', text, 'disk') if mb < lim['disk_critical']
+                           else ('degraded', text, None) if mb < lim['disk_warn'] or free < total / 10 else ('ok', text, None))
+
+        # the router capture is an extra: a problem with it is worth knowing, not a reason to distrust the probes
+        if self.args.hook:
+            if not self.hook_alive():
+                sig['router_capture'] = ('degraded', 'the capture thread has stopped', None)
+            elif self.hook_failures >= 3:
+                sig['router_capture'] = ('degraded', f'{self.hook_failures} captures in a row reported an error', None)
+            else:
+                sig['router_capture'] = ('ok', 'ok', None)
+        return sig
+
+    def health_step(self, t=None):
+        """One 15 second sample: collect the signals, record a change to or from unhealthy in
+        events.csv, and rewrite health.json."""
+        t = t or now()
+        signals = self.collect_signals(self.wall(), self.mono())
+        bad = sorted({reason for severity, _, reason in signals.values() if severity == 'unhealthy'})
+        change = self.health.update(bad, t)
+        if change:
+            kind, when, duration, detail = change
+            self.event(when, 'monitor', kind, duration, detail)
+        self.write_health(t, signals)
+
+    def write_health(self, t, signals, stopped=False):
+        """health.json: written atomically, readable by the web page's unprivileged user, no secrets."""
+        unhealthy = self.health.state == 'unhealthy'
+        degraded = any(sev == 'degraded' for sev, _, _ in signals.values())
+        doc = {
+            'time': iso(t),
+            'state': 'stopped' if stopped else 'unhealthy' if unhealthy else 'degraded' if degraded else 'healthy',
+            'unhealthy_since': iso(self.health.since) if unhealthy else None,
+            'reasons': sorted(self.health.reasons) if unhealthy else [],
+            'signals': {name: {'state': sev, 'value': value} for name, (sev, value, _) in signals.items()},
+        }
+        path = os.path.join(self.args.data, HEALTH_FILE)
+        try:
+            with open(path + '.tmp', 'w') as f:
+                json.dump(doc, f, ensure_ascii=False)
+                f.write('\n')
+            os.chmod(path + '.tmp', 0o644)
+            os.replace(path + '.tmp', path)
+        except OSError as e:
+            self.warn('health-file', f'cannot write {HEALTH_FILE}: {e}')
+
     def restart_dead(self, threads, specs):
         """Start again any thread that has ended. The loops catch their own errors, so this is a safety
         net: a thread that is gone would leave a target silently unmonitored. Returns how many."""
@@ -425,6 +620,7 @@ class Monitor:
     def maintenance(self):
         last_path = time.monotonic()
         while not self.stop.wait(15):
+            self.beats['maintenance'] = self.mono()
             try:
                 last_path = self.maintain(last_path)
             except Exception:  # the writer of minute.csv must not stop because one cycle went wrong
@@ -458,14 +654,25 @@ class Monitor:
         if self.args.hook:
             specs.append((self.hook_loop, ()))
         threads = [threading.Thread(target=fn, args=args, daemon=True) for fn, args in specs]
+        self.threads, self.hook_index = threads, (len(threads) - 1 if self.args.hook else None)
+        started = self.mono()
+        self.beats.update({name: started for name in [n for n, _ in self.probes().items()] + ['maintenance']})
         for th in threads:
             th.start()
-        while not self.stop.wait(10):  # the main thread watches the others
+        next_sample = time.monotonic() + self.health_every
+        while not self.stop.wait(self.supervise_every):  # the main thread watches the others, and the health
             self.restart_dead(threads, specs)
+            if time.monotonic() >= next_sample:
+                next_sample += self.health_every
+                try:
+                    self.health_step()
+                except Exception:
+                    self.warn('health', f'health check failed:\n{traceback.format_exc()}')
         for th in threads:
             th.join(timeout=5)
         self.flush_minutes(everything=True)
         self.event(now(), 'monitor', 'stop')
+        self.write_health(now(), {}, stopped=True)
         self.report_unwritten()
 
     def report_unwritten(self):
@@ -492,8 +699,16 @@ OPTIONS = [
     ('hook', 'interval', '--hook-interval', int, 300,
      'seconds between periodic captures when the line is up (0 = only around outages)'),
     ('hook', 'timeout', '--hook-timeout', int, 30, 'seconds before a capture is abandoned'),
+    ('health', 'stall', '--health-stall', int, 30, 'seconds without progress before a thread counts as stalled'),
+    ('health', 'clock_step', '--health-clock-step', float, 2.0, 'seconds the clock may jump before measurements are unreliable'),
+    ('health', 'ntp_grace', '--health-ntp-grace', int, 600, 'seconds the clock may stay unsynchronised before measurements are unreliable'),
+    ('health', 'disk_warn', '--health-disk-warn', int, 1000, 'free megabytes in the data directory below which health is degraded'),
+    ('health', 'disk_critical', '--health-disk-critical', int, 100, 'free megabytes below which measurements are unreliable'),
 ]
-MINIMUM = {'interval': 0.001, 'threshold': 1, 'hook_during': 1, 'hook_interval': 0, 'hook_timeout': 1}
+MINIMUM = {'interval': 0.001, 'threshold': 1, 'hook_during': 1, 'hook_interval': 0, 'hook_timeout': 1,
+           'health_stall': 5, 'health_clock_step': 0.5, 'health_ntp_grace': 0, 'health_disk_warn': 0,
+           'health_disk_critical': 0}
+HEALTH_DEFAULTS = {key: default for section, key, _, _, default, _ in OPTIONS if section == 'health'}
 
 
 class ConfigError(Exception):
@@ -581,6 +796,8 @@ def parse_settings(argv):
         if getattr(args, name) < low:
             flag = next(f for _, _, f, *_ in OPTIONS if dest(f) == name)
             raise ConfigError(f'{flag} must be at least {low:g}, not {getattr(args, name):g}')
+    if args.health_disk_warn < args.health_disk_critical:
+        raise ConfigError('--health-disk-warn must not be below --health-disk-critical')
     return args, path, bool(file_values) or os.path.exists(path)
 
 

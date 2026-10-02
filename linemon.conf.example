@@ -30,3 +30,18 @@ during = 30
 interval = 300
 # Seconds before a capture is abandoned.
 timeout = 30
+
+[health]
+# linemon watches its own health every 15 seconds and writes it to health.json. Time when it
+# can't trust its own measurements is recorded in events.csv as unhealthy, and counts as unknown.
+#
+# Seconds a thread may go without progress before it counts as stalled (a probe takes about a second).
+stall = 30
+# Seconds the clock may jump, compared with the monotonic clock, before measurements are unreliable.
+clock_step = 2.0
+# Seconds the clock may stay unsynchronised (NTP) before measurements are unreliable.
+ntp_grace = 600
+# Free megabytes in the data directory below which health is degraded...
+disk_warn = 1000
+# ...and below which measurements are unreliable (writes are about to fail).
+disk_critical = 100

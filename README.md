@@ -247,6 +247,7 @@ Everything is in `/var/lib/linemon`:
 | `events.csv` | One row per down/up transition per target, plus monitor start/stop and router changes |
 | `minute.csv` | Per target and minute: probes sent, lost, average and max round-trip time |
 | `path.log` | The discovered path, NTP sync and power status, at start, after a router change, and hourly |
+| `health.json` | Whether linemon trusts its own measurements right now, rewritten every 15 seconds. Changes to and from *unhealthy* are also in `events.csv`. |
 | `captures.jsonl` | The router's own status, if a router capture is set up |
 | `captures/` | Raw router responses from captures taken around outages |
 
