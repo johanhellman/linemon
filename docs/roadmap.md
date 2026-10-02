@@ -30,7 +30,7 @@ Tell the user when the line fails, and produce evidence they can send to the ISP
 | Spike | Time-box | Depends on |
 |---|---|---|
 | [#8](https://github.com/johanhellman/linemon/issues/8) Define availability, MTBF and MTTR honestly ([findings](spikes/008-availability.md); follow-ups [#19](https://github.com/johanhellman/linemon/issues/19), [#20](https://github.com/johanhellman/linemon/issues/20), [#21](https://github.com/johanhellman/linemon/issues/21)) | 0.5 day | – |
-| [#9](https://github.com/johanhellman/linemon/issues/9) Notifications that work when the line itself is down | 1 day | [#4](https://github.com/johanhellman/linemon/issues/4) |
+| [#9](https://github.com/johanhellman/linemon/issues/9) Notifications that work when the line itself is down ([findings](spikes/009-notify.md); follow-ups [#44](https://github.com/johanhellman/linemon/issues/44), [#45](https://github.com/johanhellman/linemon/issues/45), [#46](https://github.com/johanhellman/linemon/issues/46), [#47](https://github.com/johanhellman/linemon/issues/47), [#48](https://github.com/johanhellman/linemon/issues/48)) | 1 day | [#4](https://github.com/johanhellman/linemon/issues/4) |
 | [#10](https://github.com/johanhellman/linemon/issues/10) An evidence report for any period | 1.5 days | [#8](https://github.com/johanhellman/linemon/issues/8) |
 
 ## M3 Deeper measurement
