@@ -925,6 +925,153 @@ class Availability(unittest.TestCase):
         self.assertEqual(analyze.local_time('2026-10-01T00:00:00+02:00').utcoffset(), dt.timedelta(hours=2))
 
 
+class LocalErrors(unittest.TestCase):
+    """A fault on the Pi is not an outage, and a failed write must not lose one (issues #39, #40)."""
+
+    def setUp(self):
+        import contextlib
+        import io
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        args = types.SimpleNamespace(iface='eth0', data=self.tmp, interval=0.02, threshold=3,
+                                     hook=None, hook_during=30, hook_interval=300, hook_timeout=30)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            self.mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(lambda: [f.close() for f in (self.mon.events_f, self.mon.minute_f) if f])
+        self.err = io.StringIO()
+        stderr = contextlib.redirect_stderr(self.err)
+        stderr.__enter__()
+        self.addCleanup(stderr.__exit__, None, None, None)
+
+    def rows(self, name='events.csv'):
+        with open(os.path.join(self.tmp, name), newline='') as f:
+            return [line for line in f.read().split('\r\n') if line][1:]
+
+    def fail(self, errno_):
+        def broken(*a, **k):
+            raise OSError(errno_, os.strerror(errno_))
+        return broken
+
+    # --- #39
+
+    def test_a_probe_that_raises_is_not_a_failed_probe(self):
+        import errno
+
+        def raises():
+            raise OSError(errno.EMFILE, 'Too many open files')
+        for _ in range(5):
+            self.mon.probe_once('gateway', raises)
+        self.assertEqual(self.rows(), [])                                  # no false outage
+        self.assertNotIn('gateway', self.mon.down)
+        self.assertEqual(self.mon.probe_errors, {'gateway': 5})
+        self.assertIn('the probe raised an error', self.err.getvalue())
+        self.assertEqual(self.err.getvalue().count('the probe raised an error'), 1)  # said once, not five times
+
+    def test_real_failures_still_make_an_outage(self):
+        for _ in range(3):
+            self.mon.probe_once('gateway', lambda: (False, None, None))
+        self.mon.probe_once('gateway', lambda: (True, 1.0, '192.168.1.1'))
+        self.assertEqual([r.split(',')[1:3] for r in self.rows()], [['gateway', 'down'], ['gateway', 'up']])
+
+    def test_an_error_between_failures_does_not_reset_or_count(self):
+        self.mon.probe_once('gateway', lambda: (False, None, None))
+        self.mon.probe_once('gateway', self.fail(24))
+        self.mon.probe_once('gateway', lambda: (False, None, None))
+        self.mon.probe_once('gateway', lambda: (False, None, None))
+        self.assertEqual(len(self.rows()), 1)                              # still three failures in a row
+
+    # --- #40
+
+    def test_a_failed_fsync_keeps_the_event_and_retries(self):
+        import errno
+        real = os.fsync
+        os.fsync = self.fail(errno.ENOSPC)
+        try:
+            self.mon.event(analyze.parse_time('2026-10-02T12:00:00+02:00'), 'gateway', 'down')  # must not raise
+        finally:
+            os.fsync = real
+        self.assertEqual(len(self.mon.pending_events), 1)
+        self.assertIn('cannot write events.csv', self.err.getvalue())
+        self.mon.event(analyze.parse_time('2026-10-02T12:01:00+02:00'), 'gateway', 'up', '60')
+        self.assertEqual(self.mon.pending_events, [])
+        times = [r.split(',')[0] for r in self.rows()]
+        self.assertEqual(times[0], '2026-10-02T12:00:00.000+02:00')        # the outage is there, written first
+        self.assertEqual(times[-1], '2026-10-02T12:01:00.000+02:00')
+        self.assertLessEqual(len(times), 3)                                # a repeat of the first row is possible, and harmless
+        self.assertEqual([(r['target'], r['event']) for r in analyze.load_events(self.tmp)][0], ('gateway', 'down'))
+
+    def test_a_failed_write_is_retried_by_the_maintenance_cycle(self):
+        import errno
+        self.mon.events = types.SimpleNamespace(writerow=self.fail(errno.EIO))
+        self.mon.event(analyze.parse_time('2026-10-02T12:00:00+02:00'), '1.1.1.1', 'down')
+        self.assertEqual(len(self.mon.pending_events), 1)
+        self.assertIsNone(self.mon.events_f)                                # not trusted after an error
+        self.mon.retry_events()
+        self.assertEqual((self.mon.pending_events, len(self.rows())), ([], 1))
+
+    def test_minute_rows_are_kept_when_they_cannot_be_written(self):
+        import errno
+        now_ = linemon.now()
+        for i in range(3):
+            self.mon.record(now_ - dt.timedelta(minutes=5 + i), 'gateway', True, 1.0)
+        self.mon.minute = types.SimpleNamespace(writerow=self.fail(errno.ENOSPC))
+        self.mon.flush_minutes()
+        self.assertEqual(len(self.mon.pending_minutes), 3)
+        self.assertIn('cannot write minute.csv', self.err.getvalue())
+        self.mon.flush_minutes()                                            # the disk is back
+        self.assertEqual((self.mon.pending_minutes, len(self.rows('minute.csv'))), ([], 3))
+
+    def test_a_disk_that_stays_broken_does_not_eat_the_memory(self):
+        self.mon.pending_minutes = [['2026-10-02T12:00:00+02:00', 'gateway', 60, 0, '1.0', '2.0']] * (linemon.MAX_PENDING_MINUTES + 5)
+        self.mon.minute = types.SimpleNamespace(writerow=self.fail(28))
+        self.mon.flush_minutes()
+        self.assertEqual(len(self.mon.pending_minutes), linemon.MAX_PENDING_MINUTES)
+        self.assertIn('dropped the 5 oldest', self.err.getvalue())
+
+    def test_an_unexpected_error_does_not_end_the_target_thread(self):
+        self.mon.record = self.fail(5)                                      # a bug in the loop, not in the probe
+        original, linemon.random.random = linemon.random.random, lambda: 0
+        try:
+            th = threading.Thread(target=self.mon.run_target, args=('gateway', lambda: (True, 1.0, 'x')), daemon=True)
+            th.start()
+            time.sleep(0.3)
+            self.assertTrue(th.is_alive())
+        finally:
+            linemon.random.random = original
+            self.mon.stop.set()
+            th.join(2)
+        self.assertIn('gateway: unexpected error', self.err.getvalue())
+
+    def test_the_supervisor_restarts_a_thread_that_ended(self):
+        ran = []
+        specs = [(lambda name: ran.append(name), ('gateway',))]
+        threads = [threading.Thread(target=specs[0][0], args=specs[0][1])]
+        threads[0].start()
+        threads[0].join()
+        self.assertEqual(self.mon.restart_dead(threads, specs), 1)
+        threads[0].join()
+        self.assertEqual(ran, ['gateway', 'gateway'])
+        self.assertIn('ended unexpectedly', self.err.getvalue())
+        self.mon.stop.set()
+        self.assertEqual(self.mon.restart_dead(threads, specs), 0)          # not while shutting down
+
+    def test_the_hook_thread_survives_a_failing_capture(self):
+        self.mon.args.hook, self.mon.args.hook_interval = 'unused', 1
+        self.mon.run_hook = self.fail(5)
+        th = threading.Thread(target=self.mon.hook_loop, daemon=True)
+        th.start()
+        time.sleep(2.5)
+        alive = th.is_alive()
+        self.mon.stop.set()
+        th.join(3)
+        self.assertTrue(alive)
+        self.assertIn('router capture failed unexpectedly', self.err.getvalue())
+
+
 class Trim(unittest.TestCase):
     def test_trim_before(self):
         tmp = tempfile.mkdtemp()

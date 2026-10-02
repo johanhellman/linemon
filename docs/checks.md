@@ -101,6 +101,15 @@ These show whether name lookups fail together with the rest, or on their own.
   (a crash or power cut) is taken to have ended when it was last seen: its last event or
   the end of its last `minute.csv` row, whichever is later. Outages still open then end
   there too, so the gap isn't counted as downtime either.
+- **A fault on the Pi is not an outage.** If a probe raises an error on the monitor itself (out of
+  file descriptors, a bug), that probe is skipped: it is not counted as a failure, and the error is
+  logged to the journal (once a minute at most) and counted. It neither starts nor ends an outage.
+- **A failed write isn't lost.** If `events.csv` or `minute.csv` can't be written (disk full, I/O
+  error), the rows are kept in memory and written again by the next 15 second cycle, after
+  reopening the file. A row can then appear twice, which the analyzer ignores. If `minute.csv`
+  stays unwritable for about a week, the oldest per-minute rows are dropped to protect the
+  memory; events are never dropped. The monitor's threads catch their own errors and are
+  restarted if one ends anyway.
 - **Cadence:** each target is probed every second. A probe that times out takes about a
   second itself, so during outages the cadence is about 1.1 seconds.
 
