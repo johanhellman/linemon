@@ -1025,6 +1025,14 @@ class LocalErrors(unittest.TestCase):
         self.mon.flush_minutes()                                            # the disk is back
         self.assertEqual((self.mon.pending_minutes, len(self.rows('minute.csv'))), ([], 3))
 
+    def test_stopping_with_rows_that_could_not_be_written_says_so(self):
+        self.mon.report_unwritten()
+        self.assertEqual(self.err.getvalue(), '')
+        self.mon.pending_events = [['t', 'gateway', 'down', '', '']]
+        self.mon.pending_minutes = [['m', 'gateway', 60, 0, '', '']] * 2
+        self.mon.report_unwritten()
+        self.assertIn('1 event row(s) and 2 minute row(s) that could not be written', self.err.getvalue())
+
     def test_a_disk_that_stays_broken_does_not_eat_the_memory(self):
         self.mon.pending_minutes = [['2026-10-02T12:00:00+02:00', 'gateway', 60, 0, '1.0', '2.0']] * (linemon.MAX_PENDING_MINUTES + 5)
         self.mon.minute = types.SimpleNamespace(writerow=self.fail(28))
