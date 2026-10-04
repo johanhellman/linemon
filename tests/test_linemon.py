@@ -924,6 +924,13 @@ class Availability(unittest.TestCase):
         self.assertEqual((a['downtime_s'], a['outages'], a['unreliable_outages'], a['unreliable_s']), (600, 1, 1, 600))
         self.assertEqual(a['mttr_s'], 600)                                 # the part measured while trustworthy
 
+    def test_an_outage_from_before_the_period_is_still_reported_as_affected(self):
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 4), 'monitor', 'unhealthy'), (self.at(0, 5), 'monitor', 'healthy')]
+        events += self.internet(self.at(0, 3), self.at(0, 4, 30))          # starts before the period, ends inside the unhealthy hour
+        data = self.data(events, [(self.at(), self.at(0, 12))])
+        a = analyze.availability(data, self.at(0, 4), self.at(0, 12), now=self.at(1))
+        self.assertEqual((a['outages'], a['unreliable_outages'], a['unreliable_s']), (0, 1, 1800))   # not its period's outage, but affected
+
     def test_an_unhealthy_period_open_across_a_crash_ends_where_the_run_did(self):
         events = [(self.at(), 'monitor', 'start'), (self.at(0, 10), 'monitor', 'unhealthy'),
                   (self.at(0, 12), 'monitor', 'start')]                    # power cut at about 10:30, back at 12:00
