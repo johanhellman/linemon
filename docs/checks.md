@@ -119,7 +119,7 @@ These show whether name lookups fail together with the rest, or on their own.
 
 The analyzer and the web page find every period where all three internet hosts were
 down at once. For each one, they check the layers in order and report the first one
-that was also down at any point during that period:
+that was also down during that period:
 
 | Result | Meaning |
 |---|---|
@@ -129,15 +129,23 @@ that was also down at any point during that period:
 | second ISP hop unreachable | The first operator router answered but the second didn't. |
 | beyond the ISP hops | The router and both hops answered, but the internet hosts didn't: further into the operator's network or beyond. |
 
+The cable and the router answer ordinary probes, so either one counts if it was down at any
+moment of the outage. The two ISP hops are probed with TTL-limited pings, and routers often
+rate-limit those replies, so a hop can show a few seconds of "down" on its own, many times a day.
+A hop therefore counts only if it was **down for at least half of the outage**. On one real line
+hop 1 showed 828 such blips in 65 hours (median 3 s, longest 8 s), while during all 41 internet
+outages it was down for 88 to 100 % of the outage, so the two are easy to tell apart.
+
 ## Configuration
 
 Settings are read at start from `/etc/linemon/linemon.conf` (an INI file; see
 `linemon.conf.example` for every setting and its default), then overridden by
 command-line arguments, which include `LINEMON_ARGS` from `/etc/default/linemon`.
-The settings are `[monitor]` `iface`, `data`, `interval` and `threshold`, and `[hook]`
-`command`, `during`, `interval` and `timeout`: the same as the `--iface`, `--data`,
-`--interval`, `--threshold`, `--hook`, `--hook-during`, `--hook-interval` and
-`--hook-timeout` arguments.
+The settings are `[monitor]` `iface`, `data`, `interval` and `threshold`, `[hook]`
+`command`, `during`, `interval` and `timeout`, and `[health]` `stall`, `clock_step`,
+`ntp_grace`, `disk_warn` and `disk_critical`: the same as the `--iface`, `--data`,
+`--interval`, `--threshold`, `--hook`, `--hook-during`, `--hook-interval`, `--hook-timeout`
+and `--health-*` arguments.
 
 - **Strict.** An unknown setting, a value of the wrong type or out of range (for example a
   `threshold` below 1), a file that can't be parsed, or an unknown argument is an error.
@@ -179,7 +187,11 @@ couldn't see is unknown, and is reported next to every figure, never counted as 
   counted: the time inside the unhealthy period is taken out of both downtime and observed time,
   and the report says how many outages were affected and for how long, so they are listed, not
   dropped. An outage that straddles the edge is split: the part measured while healthy counts.
-- **Low confidence.** If more than 1 % of the period is unknown, the report says so.
+- **Before monitoring began.** If the period starts before the first monitoring (for example
+  "this month" when monitoring began on the 5th), that time is shown on its own line and not
+  counted: it isn't unknown time of a monitor that was down, and it doesn't affect the
+  confidence check. A period entirely before monitoring has no figures.
+- **Low confidence.** If more than 1 % of the counted period is unknown, the report says so.
 - **Planned maintenance** can't be known to linemon, so nothing is excluded. Operators often
   state availability per month at their own network edge, excluding planned work, so their
   figure and this one can legitimately differ.
@@ -373,8 +385,10 @@ for example:
 
 - **One second resolution.** Outages shorter than about 3 seconds are not counted.
 - **Hop rate limits.** Routers may rate-limit "Time to live exceeded" replies. A hop
-  can then look briefly down on its own; that only matters when the internet hosts are
-  down at the same time, which is what the classification uses.
+  can then look briefly down on its own, which is why the classification only blames a hop
+  that was down for at least half of an internet outage ([Where the path
+  broke](#where-the-path-broke)). The hop targets themselves still show those blips, and
+  their outage counts are not a measure of the line.
 - **Hidden hops.** If the operator hides the hops right after your router, `isp_hop1`
   is further out, and "access network" covers everything up to it.
 - **Same building, same power.** The monitor and the ISP router share the same mains.

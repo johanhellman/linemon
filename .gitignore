@@ -5,3 +5,7 @@ __pycache__/
 # Measurement data and exports stay out of the repo
 linemon-data/
 *.csv
+linemon-backup-*/
+captures.jsonl
+path.log
+health.json

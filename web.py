@@ -306,7 +306,8 @@ canvas { width:100%; height:150px; display:block }
         <tr><td class="nw">1.1.1.1, 8.8.8.8, 9.9.9.9</td><td>Cloudflare, Google and Quad9</td><td>Ping each host</td><td>Internet outage when all three fail at once</td></tr>
         <tr><td class="nw">DNS via router / 1.1.1.1</td><td>Name lookups</td><td>Lookup of a random name (no cache can answer) via the router and directly</td><td>Name resolution</td></tr>
       </tbody></table>
-      <p class="small muted">"Where it broke" names the first layer that was also down during an internet outage.
+      <p class="small muted">"Where it broke" names the first layer that was also down during an internet outage (for the two ISP hops, down for
+        at least half of it: their replies are often rate-limited, so a few seconds of "down" proves nothing).
         "Beyond the ISP hops" means the router and the first hops answered, but the internet hosts did not.</p>
       <p class="small muted">"Monitor health": every 15 seconds the monitor checks that it can trust its own
         measurements: its threads keep making progress, nothing fails on the Pi while probing, data can be written,
