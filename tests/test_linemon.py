@@ -931,6 +931,46 @@ class Availability(unittest.TestCase):
         a = analyze.availability(data, self.at(0, 4), self.at(0, 12), now=self.at(1))
         self.assertEqual((a['outages'], a['unreliable_outages'], a['unreliable_s']), (0, 1, 1800))   # not its period's outage, but affected
 
+    def test_time_before_monitoring_began_is_reported_apart_and_not_counted(self):
+        events = [(self.at(), 'monitor', 'start')] + self.internet(self.at(0, 5), self.at(0, 5, 10))
+        data = self.data(events, [(self.at(), self.at(0, 12))])
+        # asked for the day before as well, as "this month" does when monitoring began part-way through
+        a = analyze.availability(data, self.at(-1), self.at(0, 12), now=self.at(1))
+        self.assertEqual((a['before_s'], a['period_s'], a['observed_s'], a['unknown_s']), (86400, 12 * 3600, 12 * 3600, 0))
+        self.assertFalse(a['low_confidence'])                              # nothing was lost once it was running
+        self.assertEqual((a['outages'], a['downtime_s']), (1, 600))
+        self.assertAlmostEqual(100 * a['availability'], 100 * (12 * 3600 - 600) / (12 * 3600), places=6)
+
+    def test_unknown_time_after_monitoring_began_still_counts(self):
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 5), 'monitor', 'start')]          # a power cut at about 04:00
+        data = self.data(events, [(self.at(), self.at(0, 4)), (self.at(0, 5), self.at(0, 12))])
+        a = analyze.availability(data, self.at(-1), self.at(0, 12), now=self.at(1))
+        self.assertEqual((a['before_s'], a['unknown_s']), (86400, 3600))   # the hour lost to the power cut is unknown
+        self.assertTrue(a['low_confidence'])                               # 1 h of 12 is more than 1 %
+
+    def test_a_period_entirely_before_monitoring(self):
+        import subprocess
+        data = self.data([(self.at(), 'monitor', 'start')], [(self.at(), self.at(0, 12))])
+        a = analyze.availability(data, self.at(-3), self.at(-1), now=self.at(1))
+        self.assertEqual((a['before_s'], a['period_s'], a['observed_s']), (2 * 86400, 0, 0))
+        self.assertIsNone(a['availability'])
+        self.assertFalse(a['low_confidence'])
+        out = subprocess.run([sys.executable, os.path.join(ROOT, 'analyze.py'), data, '--from', '2026-07-31T00:00:00+02:00',
+                              '--to', '2026-08-02T00:00:00+02:00'], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)                    # no division by zero
+        self.assertIn('Before monitoring began: 48 h 0 min 0 s (not counted)', out.stdout)
+        self.assertIn('Monitoring had not started in this period', out.stdout)
+
+    def test_cli_shows_before_monitoring_and_no_false_low_confidence(self):
+        import subprocess
+        data = self.data([(self.at(), 'monitor', 'start')], [(self.at(), self.at(0, 12))])
+        out = subprocess.run([sys.executable, os.path.join(ROOT, 'analyze.py'), data, '--from', '2026-08-02T00:00:00+02:00',
+                              '--to', '2026-08-03T12:00:00+02:00'], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('Before monitoring began: 24 h 0 min 0 s (not counted)', out.stdout)
+        self.assertIn('Counted period: 12 h 0 min 0 s', out.stdout)
+        self.assertNotIn('Low confidence', out.stdout)
+
     def test_an_unhealthy_period_open_across_a_crash_ends_where_the_run_did(self):
         events = [(self.at(), 'monitor', 'start'), (self.at(0, 10), 'monitor', 'unhealthy'),
                   (self.at(0, 12), 'monitor', 'start')]                    # power cut at about 10:30, back at 12:00
@@ -1637,6 +1677,72 @@ class PageScript(unittest.TestCase):
         self.assertIn('linemon stopped at', out['healthBanner'][2])
         out = self.page(raw='not json')
         self.assertEqual((out['healthBanner'][2], out['meta']), ('The monitor is not reporting its health.', 'No readable health report.'))
+
+
+class PathClassification(unittest.TestCase):
+    """Which layer an internet outage is blamed on. The ISP hops are rate-limited, so a short blip
+    isn't enough (found on a real line: 870 hop-1 blips in 65 hours, 41 of 41 outages blamed on hop 1)."""
+
+    TZ = dt.timezone(dt.timedelta(hours=2))
+    ACCESS = 'first ISP hop unreachable (access network)'
+    SECOND = 'second ISP hop unreachable'
+    BEYOND = 'beyond the ISP hops (router and first hops answered)'
+
+    def at(self, seconds):
+        return dt.datetime(2026, 8, 3, 10, 0, tzinfo=self.TZ) + dt.timedelta(seconds=seconds)
+
+    def outages(self, **layers):
+        return {name: [(self.at(s), self.at(e) if e is not None else None, e is None) for s, e in ivs]
+                for name, ivs in layers.items()}
+
+    def classify(self, start=0, end=600, **layers):
+        return analyze.classify(self.at(start), self.at(end), self.outages(**layers))
+
+    def test_a_short_hop_blip_is_not_blamed(self):
+        self.assertEqual(self.classify(isp_hop1=[(100, 103)]), self.BEYOND)         # 3 s of a 600 s outage
+        self.assertEqual(self.classify(isp_hop1=[(0, 120), (300, 330)]), self.BEYOND)  # 150 s: a quarter
+
+    def test_a_hop_down_for_most_of_the_outage_is_blamed(self):
+        self.assertEqual(self.classify(isp_hop1=[(0, 300)]), self.ACCESS)               # exactly half counts
+        self.assertEqual(self.classify(isp_hop1=[(-60, 480)]), self.ACCESS)             # started before, covers 80 %
+        self.assertEqual(self.classify(isp_hop1=[(100, 200), (250, 600)]), self.ACCESS)  # in two pieces: 450 s
+        self.assertEqual(self.classify(isp_hop1=[(200, None)]), self.ACCESS)            # still down at the end of the data
+
+    def test_the_second_hop_when_the_first_was_only_a_blip(self):
+        self.assertEqual(self.classify(isp_hop1=[(10, 14)], isp_hop2=[(0, 580)]), self.SECOND)
+
+    def test_the_cable_and_the_router_need_only_to_overlap(self):
+        self.assertEqual(self.classify(link=[(300, 304)], isp_hop1=[(0, 600)]), 'monitor cable/port down')
+        self.assertEqual(self.classify(gateway=[(599, 603)], isp_hop1=[(0, 600)]), 'ISP router not responding')
+        self.assertEqual(self.classify(gateway=[(700, 710)]), self.BEYOND)               # no overlap at all
+
+    def test_nothing_down_is_beyond_the_hops(self):
+        self.assertEqual(self.classify(), self.BEYOND)
+
+    def test_the_real_pattern_of_noisy_hop_one(self):
+        """A hop-1 blip of 3 s every 270 s, against 78 s outages at many offsets: none is blamed on hop 1."""
+        blips = [(t, t + 3) for t in range(0, 20000, 270)]
+        wrong = [off for off in range(0, 20000, 37)
+                 if analyze.classify(self.at(off), self.at(off + 78), self.outages(isp_hop1=blips)) == self.ACCESS]
+        self.assertEqual(wrong, [])
+        # and when hop 1 really is down for the length of the outage, it is
+        real = blips + [(5000, 5080)]
+        self.assertEqual(analyze.classify(self.at(5000), self.at(5078), self.outages(isp_hop1=real)), self.ACCESS)
+
+    def test_the_page_uses_the_same_rule(self):
+        import web
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        now = dt.datetime.now().astimezone().replace(microsecond=0)
+        t = lambda sec: (now - dt.timedelta(minutes=30) + dt.timedelta(seconds=sec)).isoformat(timespec='milliseconds')
+        rows = [f'{t(0)},monitor,start,,eth0']
+        rows += [f'{t(100)},isp_hop1,down,,x', f'{t(103)},isp_hop1,up,3,x']          # a blip inside the outage
+        rows += [f'{t(100)},{h},down,,' for h in analyze.INTERNET_HOSTS] + [f'{t(700)},{h},up,600,' for h in analyze.INTERNET_HOSTS]
+        with open(os.path.join(tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n' + '\n'.join(rows) + '\n')
+        with open(os.path.join(tmp, 'minute.csv'), 'w') as f:
+            f.write(f'minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n{now.replace(second=0).isoformat()},link,60,0,,\n')
+        self.assertEqual(web.status(tmp)['internet']['outages'][0]['layer'], self.BEYOND)
 
 
 class Trim(unittest.TestCase):

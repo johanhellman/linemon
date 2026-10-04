@@ -363,11 +363,26 @@ def overlaps(a_start, a_end, b_start, b_end, tolerance=0):
     return a_start <= b_end + tol and b_start <= a_end + tol
 
 
+RATE_LIMITED = ('isp_hop1', 'isp_hop2')
+HOP_SHARE = 0.5  # of an outage a hop must be down to be blamed for it
+
+
 def classify(start, end, outages):
+    """The first layer that was also down during an internet outage.
+
+    The cable and the ISP router answer ordinary probes, so any overlap counts. The two ISP hops are
+    probed with TTL-limited pings, and routers often rate-limit those replies, so a hop can blip for a
+    few seconds on its own (on a real line, hundreds of times a day). A hop only counts if it was down
+    for at least HOP_SHARE of the outage.
+    """
+    length = (end - start).total_seconds()
     for target, label in LAYERS:
-        for s, e, _ in outages.get(target, []):
-            if overlaps(start, end, s, e or end):
+        intervals = [(s, e or end) for s, e, _ in outages.get(target, [])]
+        if target in RATE_LIMITED:
+            if length > 0 and _total(_clip(intervals, start, end)) >= HOP_SHARE * length:
                 return label
+        elif any(overlaps(start, end, s, e) for s, e in intervals):
+            return label
     return 'beyond the ISP hops (router and first hops answered)'
 
 
@@ -496,7 +511,10 @@ def availability(data_dir, lo, hi, now, include_all=False):
     cuts = link_down + unhealthy
     observed = _subtract(monitored, cuts)
 
-    period = (hi - lo).total_seconds()
+    # Time before the first monitoring began isn't "the monitor was down": it is reported apart and not counted.
+    begun = max(lo, periods[0][0])
+    before = max(0.0, (min(hi, begun) - lo).total_seconds())
+    period = max(0.0, (hi - begun).total_seconds())
     downtime, completed, count, ongoing, unreliable, unreliable_s = 0.0, [], 0, 0, 0, 0.0
     for s, e, is_ongoing in intersect_all([outages.get(h, []) for h in INTERNET_HOSTS], open_end=open_end):
         pieces = _subtract([(s, e)], cuts)
@@ -514,7 +532,7 @@ def availability(data_dir, lo, hi, now, include_all=False):
     seen = _total(observed)
     up = seen - downtime
     result = {
-        'from': lo, 'to': hi, 'period_s': period, 'monitored_s': _total(monitored), 'observed_s': seen,
+        'from': lo, 'to': hi, 'period_s': period, 'before_s': before, 'monitored_s': _total(monitored), 'observed_s': seen,
         'unknown_s': period - seen, 'downtime_s': downtime, 'outages': count, 'ongoing': ongoing,
         'unhealthy_s': _total(_subtract(_intersect(monitored, unhealthy), link_down)),
         'unreliable_outages': unreliable, 'unreliable_s': unreliable_s,
@@ -523,7 +541,7 @@ def availability(data_dir, lo, hi, now, include_all=False):
         'mttr_s': sum(completed) / len(completed) if completed else None,
         'mtbf_s': up / count if count else None,
     }
-    result['low_confidence'] = (period - seen) / period > LOW_CONFIDENCE
+    result['low_confidence'] = period > 0 and (period - seen) / period > LOW_CONFIDENCE
     return result
 
 
@@ -541,8 +559,14 @@ def local_time(text):
 
 
 def print_availability(a):
+    print(f'\nAvailability, {a["from"]:%d/%m/%Y %H:%M} to {a["to"]:%d/%m/%Y %H:%M}:')
+    if a['before_s']:
+        print(f'  Before monitoring began: {fmt_dur(a["before_s"])} (not counted)')
+    if not a['period_s']:
+        print('  Monitoring had not started in this period, so there are no figures.')
+        return
     pct = lambda part: f'{100 * part / a["period_s"]:.2f} %'
-    print(f'\nAvailability, {a["from"]:%d/%m/%Y %H:%M} to {a["to"]:%d/%m/%Y %H:%M} ({fmt_dur(a["period_s"])}):')
+    print(f'  Counted period: {fmt_dur(a["period_s"])}')
     print(f'  Observed (monitor running, its own cable up): {fmt_dur(a["observed_s"])}, {pct(a["observed_s"])} of the period')
     print(f'  Unknown (monitor not running, its own cable down, or it could not trust its measurements): '
           f'{fmt_dur(a["unknown_s"])}, {pct(a["unknown_s"])}')
