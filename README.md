@@ -190,6 +190,11 @@ Open `http://<monitor-address>:8080`. It refreshes every 10 seconds and shows:
 There is no login: anyone who can reach port 8080 can see the page, but it can't change
 anything.
 
+The page also shows the **monitor's own health**: a banner when linemon can't trust its own
+measurements (a stalled thread, an unsteady clock, an under-voltage power supply, a full disk), a
+card with each check, and "Internet status uncertain" in place of OK or DOWN while that lasts.
+That time counts as unknown in the analyzer's availability figures, never as up.
+
 ## Analyzer
 
 ```bash

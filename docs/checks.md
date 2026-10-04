@@ -163,8 +163,8 @@ couldn't see is unknown, and is reported next to every figure, never counted as 
 |---|---|
 | Period | The time asked about, up to now at most |
 | Monitored | The minutes with a `link` row in `minute.csv`, i.e. when the monitor was running. If there is no `minute.csv`, the monitoring runs from `events.csv` are used. |
-| Observed | Monitored time minus the time the monitor's own cable was down (`link`), because nothing it measures then says anything about the line |
-| Unknown | Period minus observed: the monitor wasn't running, or its own cable was down |
+| Observed | Monitored time minus the time the monitor's own cable was down (`link`) and the time it said it was unhealthy ([health](#the-monitors-own-health)), because nothing it measures then can be trusted |
+| Unknown | Period minus observed: the monitor wasn't running, its own cable was down, or it was unhealthy |
 | Downtime | Internet outages (all three hosts down at once) that fall in observed time. An outage in progress counts up to the end of the data. |
 | Availability | (observed − downtime) ÷ observed |
 | MTTR | The mean length of the completed outages. Outages still in progress are left out, and the report says how many. |
@@ -175,6 +175,10 @@ couldn't see is unknown, and is reported next to every figure, never counted as 
 - **Only outages of 3 seconds or more** are recorded (see [From probes to
   outages](#from-probes-to-outages)), so availability is an upper bound by a few seconds per
   real outage.
+- **Outages while unhealthy.** An internet outage the monitor measured while it was unhealthy isn't
+  counted: the time inside the unhealthy period is taken out of both downtime and observed time,
+  and the report says how many outages were affected and for how long, so they are listed, not
+  dropped. An outage that straddles the edge is split: the part measured while healthy counts.
 - **Low confidence.** If more than 1 % of the period is unknown, the report says so.
 - **Planned maintenance** can't be known to linemon, so nothing is excluded. Operators often
   state availability per month at their own network edge, excluding planned work, so their
@@ -212,7 +216,15 @@ outages: `monitor,unhealthy,,,<reasons>` with the time of the first bad sample, 
 it lasted. The reasons are `probe-stalled`, `probe-error`, `write-failing`, `clock`, `power`, `disk`,
 separated by `;`. *Degraded* is not written there; it shows only in `health.json`. A restart while
 unhealthy leaves the interval open, the same as an outage: the new `start` ends it. Time when the
-monitor was unhealthy is unknown, not up, in the same way as time it wasn't running.
+monitor was unhealthy is unknown, not up, in the same way as time it wasn't running: the analyzer
+takes it out of the availability figures ([Availability](#availability-mtbf-and-mttr)).
+
+**On the web page** a banner says when the monitor is unhealthy, since when and why, in fixed
+sentences; the main status then reads "Internet status uncertain" instead of OK or DOWN, because
+it can't be trusted either way. A health card lists every signal. If `health.json` is more than
+60 seconds old the page says the monitor isn't reporting, and a cleanly stopped monitor shows
+"stopped". The page reads `health.json` through a filter: only the known fields, the reasons
+as fixed sentences, and values that are plain text without paths or markup.
 
 **`health.json`** in the data directory is rewritten atomically every 15 seconds and can be read
 by the web page's unprivileged user. It holds no secrets or paths:

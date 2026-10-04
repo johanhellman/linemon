@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,6 +26,60 @@ LABELS = {
 
 def iso(t):
     return t.isoformat(timespec='seconds') if t else None
+
+
+# The monitor's health.json, as the page may show it. The page has no login, so nothing the monitor wrote
+# reaches it unchecked: only known fields, fixed wording for the reasons, and values that look like plain text.
+HEALTH_REASONS = {
+    'probe-stalled': 'a measurement thread stopped making progress',
+    'probe-error': 'an error on the monitor itself while probing',
+    'write-failing': 'data could not be written to disk',
+    'clock': 'the clock is unreliable',
+    'power': "the Pi's power supply is under-voltage",
+    'disk': 'the disk is nearly full',
+}
+HEALTH_SIGNALS = [
+    ('threads', 'Measurement threads'), ('probe_errors', 'Errors while probing'), ('writes', 'Writing data'),
+    ('clock', 'Clock'), ('power', 'Power and temperature'), ('disk', 'Disk space'), ('router_capture', 'Router capture'),
+]
+HEALTH_STALE_S = 60  # health.json is rewritten every 15 s: older than this and the monitor isn't reporting
+PLAIN_TEXT = re.compile(r'^[\w .,:+\-()]{0,120}$')  # no slashes, quotes, '=' or markup: no paths, no snippets of code or replies
+
+
+def read_health(data_dir, now):
+    """The monitor's view of its own health for the page, or None if it has never written one."""
+    path = os.path.join(data_dir, 'health.json')
+    nothing = {'state': 'unknown', 'reporting': False, 'time': None, 'age_s': None,
+               'unhealthy_since': None, 'reasons': [], 'signals': []}
+    try:
+        if os.path.getsize(path) > 20000:
+            return nothing
+        with open(path) as f:
+            doc = json.load(f)
+        written, state = analyze.parse_time(doc['time']), doc['state']
+    except FileNotFoundError:
+        return None  # an older monitor, or one that hasn't sampled yet
+    except (OSError, ValueError, KeyError, TypeError):
+        return nothing
+    if state not in ('healthy', 'degraded', 'unhealthy', 'stopped'):
+        return nothing
+    age = (now - written).total_seconds()
+    reasons = doc.get('reasons') if isinstance(doc.get('reasons'), list) else []
+    signals, raw = [], doc.get('signals') if isinstance(doc.get('signals'), dict) else {}
+    for key, label in HEALTH_SIGNALS:
+        sig = raw.get(key)
+        if isinstance(sig, dict) and sig.get('state') in ('ok', 'degraded', 'unhealthy'):
+            value = sig.get('value')
+            signals.append({'name': label, 'state': sig['state'],
+                            'value': value if isinstance(value, str) and PLAIN_TEXT.match(value) else ''})
+    try:
+        since = analyze.parse_time(doc['unhealthy_since']) if doc.get('unhealthy_since') else None
+    except (ValueError, TypeError):
+        since = None
+    return {'state': state, 'reporting': state == 'stopped' or age <= HEALTH_STALE_S, 'time': iso(written),
+            'age_s': round(age), 'unhealthy_since': iso(since),
+            'reasons': [HEALTH_REASONS[r] for r in reasons if isinstance(r, str) and r in HEALTH_REASONS],
+            'signals': signals}
 
 
 def minute_series(data_dir, since):
@@ -143,6 +198,7 @@ def status(data_dir):
         'router': change['detail'].split('->')[-1].strip() if change else None,
         'last_data': iso(last_data),
         'stale': stale,
+        'health': read_health(data_dir, now),
         'internet_down_since': internet_down_since,
         'targets': targets,
         'internet': {
@@ -179,6 +235,7 @@ h1 { font-size:20px; margin:4px 0 2px } h2 { font-size:15px; margin:0 0 10px }
 .muted { color:var(--muted) } .small { font-size:12px }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin:12px 0 }
 .banner { font-size:22px; font-weight:600; padding:16px; border-radius:10px; margin:12px 0 }
+.banner.sub { font-size:15px; padding:10px 14px; margin:-4px 0 12px }
 .ok { background:var(--ok-bg); color:var(--ok) } .bad { background:var(--bad-bg); color:var(--bad) }
 .warn { background:var(--warn-bg); color:var(--warn) }
 .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px }
@@ -200,6 +257,7 @@ canvas { width:100%; height:150px; display:block }
   <h1>Line monitor</h1>
   <div class="muted small" id="meta">Loading…</div>
   <div class="banner" id="banner">…</div>
+  <div class="banner sub" id="health-banner" hidden></div>
 
   <div class="card"><h2>Internet outages</h2><div class="stats" id="stats"></div></div>
 
@@ -211,6 +269,12 @@ canvas { width:100%; height:150px; display:block }
     <p class="small muted" style="margin:0 0 6px">Worked out from the connection uptime the router reports. A new
       session means the operator's side dropped and re-established the connection.</p>
     <div class="scroll" style="max-height:200px"><table><tbody id="sessions"></tbody></table></div>
+  </div>
+
+  <div class="card" id="health-card" hidden>
+    <h2>Monitor health <span class="pill" id="health-pill"></span></h2>
+    <p class="small muted" id="health-meta"></p>
+    <table class="small"><tbody id="health-signals"></tbody></table>
   </div>
 
   <div class="card">
@@ -244,6 +308,11 @@ canvas { width:100%; height:150px; display:block }
       </tbody></table>
       <p class="small muted">"Where it broke" names the first layer that was also down during an internet outage.
         "Beyond the ISP hops" means the router and the first hops answered, but the internet hosts did not.</p>
+      <p class="small muted">"Monitor health": every 15 seconds the monitor checks that it can trust its own
+        measurements: its threads keep making progress, nothing fails on the Pi while probing, data can be written,
+        the clock is steady and synchronised, the power supply is steady (on a Raspberry Pi) and the disk isn't
+        full. When it can't, the page says so, the internet status is shown as uncertain, and that time counts as
+        unknown in the availability figures, never as up.</p>
       <p class="small muted">"Router said" is the ISP router's own status, read from its admin pages when the
         outage starts, every 30 s during it and every 5 minutes otherwise (only if a router capture is set up).
         For fibre: the GPON state (O5 = operational), whether the optical signal is present, and whether the
@@ -305,10 +374,40 @@ async function refresh() {
 
   document.getElementById('meta').textContent =
     `Monitoring since ${fmtTime(d.monitoring_since)} · router ${d.router || '?'} · last data ${fmtTime(d.last_data)} · updated ${fmtTime(d.now)}`;
-  const b = document.getElementById('banner');
+  const b = document.getElementById('banner'), h = d.health;
   if (d.stale) { b.className = 'banner warn'; b.textContent = 'No new measurements for over 3 minutes: is the monitor running?'; }
+  else if (h && h.reporting && h.state === 'unhealthy') {
+    b.className = 'banner warn'; b.textContent = "Internet status uncertain: the monitor can't trust its own measurements right now";
+  }
   else if (d.internet_down_since) { b.className = 'banner bad'; b.textContent = 'Internet DOWN since ' + fmtTime(d.internet_down_since); }
   else { b.className = 'banner ok'; b.textContent = 'Internet OK'; }
+
+  const hb = document.getElementById('health-banner'), hc = document.getElementById('health-card');
+  hb.hidden = true; hc.hidden = !h;
+  if (h) {
+    let text = '', cls = 'warn';
+    if (h.state === 'stopped') text = 'linemon stopped at ' + fmtTime(h.time) + '.';
+    else if (!h.reporting) text = 'The monitor is not reporting its health' + (h.time ? ' (last at ' + fmtTime(h.time) + ')' : '') + '.';
+    else if (h.state === 'unhealthy') {
+      cls = 'bad';
+      text = 'Measurements may be unreliable since ' + fmtTime(h.unhealthy_since) + (h.reasons.length ? ': ' + h.reasons.join('; ') : '') + '.';
+    } else if (h.state === 'degraded') {
+      text = 'Worth a look: ' + h.signals.filter(x => x.state === 'degraded').map(x => x.name + (x.value ? ' (' + x.value + ')' : '')).join('; ') + '.';
+    }
+    if (text) { hb.hidden = false; hb.className = 'banner sub ' + cls; hb.textContent = text; }
+    const pill = document.getElementById('health-pill');
+    pill.textContent = h.reporting ? h.state : (h.state === 'stopped' ? 'stopped' : 'not reporting');
+    pill.className = 'pill ' + (h.reporting && h.state === 'healthy' ? 'ok' : (h.state === 'unhealthy' ? 'bad' : 'warn'));
+    document.getElementById('health-meta').textContent = h.time ? 'Last checked ' + fmtTime(h.time) + '.' : 'No readable health report.';
+    const hs = document.createDocumentFragment();
+    h.signals.forEach(x => {
+      const tr = row([x.name, x.value], ['nw', '']);
+      const dot = document.createElement('i'); dot.className = 'dot';
+      dot.style.background = css(x.state === 'ok' ? '--ok' : (x.state === 'degraded' ? '--warn' : '--bad'));
+      tr.firstChild.prepend(dot); hs.appendChild(tr);
+    });
+    document.getElementById('health-signals').replaceChildren(hs);
+  }
 
   // Each section is built off-screen and swapped in whole, so a refresh never
   // empties the page for a moment (which made it jump when scrolled down).
