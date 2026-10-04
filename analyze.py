@@ -266,6 +266,9 @@ def router_change(rows):
 def load_outages(data_dir, include_all=False):
     """Return ({target: [(start, end, truncated)]}, monitoring periods).
 
+    Besides the probe targets, 'unhealthy' holds the periods the monitor said it couldn't trust its
+    own measurements (monitor,unhealthy ... monitor,healthy); an open one ends where the run ended.
+
     Unless include_all is set, only data since the last router change counts:
     anything before was measured somewhere else (e.g. behind the UDM during install).
     """
@@ -279,6 +282,15 @@ def load_outages(data_dir, include_all=False):
     for r in rows:
         t, target, kind = parse_time(r['time']), r['target'], r['event']
         if target == 'monitor':
+            if kind == 'unhealthy':  # the monitor couldn't trust its own measurements: tracked like an outage
+                open_down['unhealthy'] = t
+                last_seen = t
+                continue
+            if kind == 'healthy':
+                if 'unhealthy' in open_down:
+                    outages['unhealthy'].append((open_down.pop('unhealthy'), t, False))
+                last_seen = t
+                continue
             if kind not in ('start', 'stop'):
                 last_seen = t
                 continue
@@ -479,12 +491,19 @@ def availability(data_dir, lo, hi, now, include_all=False):
     if monitored is None:
         monitored = _clip([(s, e or data_end) for s, e in periods], lo, hi)
     link_down = [(s, e or open_end) for s, e, _ in outages.get('link', [])]
-    observed = _subtract(monitored, link_down)
+    unhealthy = [(s, e or open_end) for s, e, _ in outages.get('unhealthy', [])]
+    # when the cable was down, or the monitor said it couldn't trust itself, nothing it measured counts
+    cuts = link_down + unhealthy
+    observed = _subtract(monitored, cuts)
 
     period = (hi - lo).total_seconds()
-    downtime, completed, count, ongoing = 0.0, [], 0, 0
+    downtime, completed, count, ongoing, unreliable, unreliable_s = 0.0, [], 0, 0, 0, 0.0
     for s, e, is_ongoing in intersect_all([outages.get(h, []) for h in INTERNET_HOSTS], open_end=open_end):
-        pieces = _subtract([(s, e)], link_down)  # time the monitor's own cable was down says nothing about the line
+        pieces = _subtract([(s, e)], cuts)
+        inside = _total(_intersect(_clip([(s, e)], lo, hi), _intersect(monitored, unhealthy)))
+        if inside:  # measured, but while the monitor couldn't trust itself: reported apart, not counted
+            unreliable += 1 if lo <= s < hi else 0
+            unreliable_s += inside
         downtime += _total(_intersect(_clip(pieces, lo, hi), observed))
         if lo <= s < hi and pieces:  # an outage belongs to the period it started in
             count += 1
@@ -497,6 +516,8 @@ def availability(data_dir, lo, hi, now, include_all=False):
     result = {
         'from': lo, 'to': hi, 'period_s': period, 'monitored_s': _total(monitored), 'observed_s': seen,
         'unknown_s': period - seen, 'downtime_s': downtime, 'outages': count, 'ongoing': ongoing,
+        'unhealthy_s': _total(_subtract(_intersect(monitored, unhealthy), link_down)),
+        'unreliable_outages': unreliable, 'unreliable_s': unreliable_s,
         'completed': len(completed),
         'availability': up / seen if seen else None,
         'mttr_s': sum(completed) / len(completed) if completed else None,
@@ -523,12 +544,18 @@ def print_availability(a):
     pct = lambda part: f'{100 * part / a["period_s"]:.2f} %'
     print(f'\nAvailability, {a["from"]:%d/%m/%Y %H:%M} to {a["to"]:%d/%m/%Y %H:%M} ({fmt_dur(a["period_s"])}):')
     print(f'  Observed (monitor running, its own cable up): {fmt_dur(a["observed_s"])}, {pct(a["observed_s"])} of the period')
-    print(f'  Unknown (monitor not running or its own cable down): {fmt_dur(a["unknown_s"])}, {pct(a["unknown_s"])}')
+    print(f'  Unknown (monitor not running, its own cable down, or it could not trust its measurements): '
+          f'{fmt_dur(a["unknown_s"])}, {pct(a["unknown_s"])}')
+    if a['unhealthy_s']:
+        print(f'    of which the monitor was unhealthy: {fmt_dur(a["unhealthy_s"])}')
     if not a['observed_s']:
         print('  Nothing was observed in this period, so there are no figures.')
         return
     print(f'  Internet outages (3 s or more): {a["outages"]}'
           + (f' ({a["ongoing"]} still in progress)' if a['ongoing'] else '') + f', {fmt_dur(a["downtime_s"])} down')
+    if a['unreliable_outages']:
+        print(f'  {a["unreliable_outages"]} outage(s) were measured while the monitor was unhealthy '
+              f'({fmt_dur(a["unreliable_s"])} in all): that time is not counted above')
     print(f'  Availability: {100 * a["availability"]:.4f} % of observed time')
     if a['mttr_s'] is None:
         print('  MTTR: no completed outages')

@@ -906,6 +906,49 @@ class Availability(unittest.TestCase):
         self.assertIsNone(a['availability'])
         self.assertIsNone(analyze.availability(self.data([], None), self.at(), self.at(1), now=self.at(1)))
 
+    def test_unhealthy_time_is_unknown_not_up_and_not_downtime(self):
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 2), 'monitor', 'unhealthy'), (self.at(0, 3), 'monitor', 'healthy')]
+        events += self.internet(self.at(0, 2, 30), self.at(0, 2, 50))      # inside the unhealthy hour: measured, not counted
+        events += self.internet(self.at(0, 5), self.at(0, 5, 10))          # outside it: counted
+        data = self.data(events, [(self.at(), self.at(0, 12))])
+        a = analyze.availability(data, self.at(), self.at(0, 12), now=self.at(1))
+        self.assertEqual((a['observed_s'], a['unhealthy_s'], a['unknown_s']), (11 * 3600, 3600, 3600))
+        self.assertEqual((a['downtime_s'], a['outages'], a['completed']), (600, 1, 1))     # only the 5 o'clock outage
+        self.assertEqual((a['unreliable_outages'], a['unreliable_s']), (1, 1200))
+        self.assertAlmostEqual(100 * a['availability'], 100 * (11 * 3600 - 600) / (11 * 3600), places=6)
+
+    def test_an_outage_that_straddles_the_unhealthy_edge_is_split(self):
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 2), 'monitor', 'unhealthy'), (self.at(0, 3), 'monitor', 'healthy')]
+        events += self.internet(self.at(0, 1, 50), self.at(0, 2, 10))      # 10 min before the edge, 10 min after
+        a = analyze.availability(self.data(events, [(self.at(), self.at(0, 6))]), self.at(), self.at(0, 6), now=self.at(1))
+        self.assertEqual((a['downtime_s'], a['outages'], a['unreliable_outages'], a['unreliable_s']), (600, 1, 1, 600))
+        self.assertEqual(a['mttr_s'], 600)                                 # the part measured while trustworthy
+
+    def test_an_unhealthy_period_open_across_a_crash_ends_where_the_run_did(self):
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 10), 'monitor', 'unhealthy'),
+                  (self.at(0, 12), 'monitor', 'start')]                    # power cut at about 10:30, back at 12:00
+        data = self.data(events, [(self.at(), self.at(0, 10, 30)), (self.at(0, 12), self.at(0, 14))])
+        outages, _ = analyze.load_outages(data)
+        self.assertEqual(outages['unhealthy'], [(self.at(0, 10), self.at(0, 10, 30), True)])
+        a = analyze.availability(data, self.at(), self.at(0, 14), now=self.at(1))
+        self.assertEqual((a['unhealthy_s'], a['unknown_s']), (1800, 1800 + 5400))   # 30 min unhealthy + 90 min not running
+
+    def test_an_unhealthy_period_still_open_at_the_end_of_the_data(self):
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 5), 'monitor', 'unhealthy')]
+        a = analyze.availability(self.data(events, [(self.at(), self.at(0, 6))]), self.at(), self.at(0, 12), now=self.at(0, 6))
+        self.assertEqual(a['unhealthy_s'], 3600)
+
+    def test_cli_says_when_the_monitor_was_unhealthy(self):
+        import subprocess
+        events = [(self.at(), 'monitor', 'start'), (self.at(0, 2), 'monitor', 'unhealthy'), (self.at(0, 3), 'monitor', 'healthy')]
+        events += self.internet(self.at(0, 2, 30), self.at(0, 2, 50))
+        data = self.data(events, [(self.at(), self.at(0, 12))])
+        out = subprocess.run([sys.executable, os.path.join(ROOT, 'analyze.py'), data, '--from', '2026-08-03T00:00:00+02:00',
+                              '--to', '2026-08-03T12:00:00+02:00'], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('of which the monitor was unhealthy: 1 h 0 min 0 s', out.stdout)
+        self.assertIn('1 outage(s) were measured while the monitor was unhealthy (20 min 0 s in all)', out.stdout)
+
     def test_cli_prints_the_figures_for_the_given_period(self):
         import subprocess
         out = subprocess.run([sys.executable, os.path.join(ROOT, 'analyze.py'), self.week(),
@@ -913,7 +956,7 @@ class Availability(unittest.TestCase):
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
         for expected in ('Availability, 03/08/2026 00:00 to 09/08/2026 23:59', 'Availability: 99.0153 % of observed time',
-                         'Unknown (monitor not running or its own cable down): 25 min 0 s, 0.25 %',
+                         'Unknown (monitor not running, its own cable down, or it could not trust its measurements): 25 min 0 s, 0.25 %',
                          'MTTR: 20 min 0 s (mean of 2 completed outage(s); 1 still in progress left out)',
                          'MTBF: 55 h 18 min 20 s'):
             self.assertIn(expected, out.stdout)
@@ -1172,7 +1215,11 @@ class HealthSignals(unittest.TestCase):
         self.step(n=4)
         self.assertEqual([r['event'] for r in analyze.load_events(self.tmp) if r['target'] == 'monitor'], ['start', 'unhealthy', 'healthy'])
         outages, periods = analyze.load_outages(self.tmp)
-        self.assertEqual((dict(outages), len(periods)), ({}, 1))          # not outages, and not a new run
+        self.assertEqual([k for k in outages if k != 'unhealthy'], [])    # no outage of any target, and not a new run
+        self.assertEqual((len(outages['unhealthy']), len(periods)), (1, 1))
+        (start, end, truncated), = outages['unhealthy']                   # but the period itself is known
+        self.assertEqual((end - start).total_seconds(), 30)               # first bad sample (15 s) to first good one (45 s)
+        self.assertFalse(truncated)
         self.assertEqual(len(web.status(self.tmp)['events']), 3)
 
     # --- one test per signal
@@ -1368,6 +1415,221 @@ class StaticChecks(unittest.TestCase):
                     defined.add(node.name)
             used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
             self.assertEqual(sorted(used - defined), [], name)
+
+
+class HealthOnThePage(unittest.TestCase):
+    """What the page may show of health.json (issue #43). The page has no login."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.now = dt.datetime.now().astimezone().replace(microsecond=0)
+        with open(os.path.join(self.tmp, 'events.csv'), 'w') as f:
+            f.write(f'time,target,event,duration_s,detail\n{(self.now - dt.timedelta(hours=1)).isoformat()},monitor,start,,eth0\n')
+        with open(os.path.join(self.tmp, 'minute.csv'), 'w') as f:
+            f.write(f'minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n{self.now.replace(second=0).isoformat()},link,60,0,,\n')
+
+    def write(self, doc, age=5, raw=None):
+        doc = dict(doc)
+        doc.setdefault('time', (self.now - dt.timedelta(seconds=age)).isoformat())
+        with open(os.path.join(self.tmp, 'health.json'), 'w') as f:
+            f.write(raw if raw is not None else json.dumps(doc))
+
+    def health(self):
+        import web
+        return web.status(self.tmp)['health']
+
+    def test_no_file_means_no_health_data(self):
+        self.assertIsNone(self.health())
+
+    def test_healthy(self):
+        self.write({'state': 'healthy', 'unhealthy_since': None, 'reasons': [],
+                    'signals': {'disk': {'state': 'ok', 'value': '20,000 MB free'}, 'threads': {'state': 'ok', 'value': '8 threads running'}}})
+        h = self.health()
+        self.assertEqual((h['state'], h['reporting'], h['reasons'], h['unhealthy_since']), ('healthy', True, [], None))
+        self.assertEqual([(x['name'], x['state'], x['value']) for x in h['signals']],           # in a fixed order, with labels
+                         [('Measurement threads', 'ok', '8 threads running'), ('Disk space', 'ok', '20,000 MB free')])
+
+    def test_unhealthy_reasons_are_fixed_sentences(self):
+        since = (self.now - dt.timedelta(minutes=2)).isoformat()
+        self.write({'state': 'unhealthy', 'unhealthy_since': since, 'reasons': ['clock', 'probe-stalled'],
+                    'signals': {'clock': {'state': 'unhealthy', 'value': 'stepped by +3600 s'}}})
+        h = self.health()
+        self.assertEqual(h['state'], 'unhealthy')
+        self.assertEqual(h['reasons'], ['the clock is unreliable', 'a measurement thread stopped making progress'])
+        self.assertEqual(analyze.parse_time(h['unhealthy_since']), analyze.parse_time(since).replace(microsecond=0))
+        self.assertEqual(h['signals'][0]['value'], 'stepped by +3600 s')
+
+    def test_not_reporting_when_the_file_is_old_but_stopped_is_stopped(self):
+        self.write({'state': 'healthy', 'signals': {}}, age=61)
+        self.assertEqual((self.health()['state'], self.health()['reporting']), ('healthy', False))
+        self.write({'state': 'healthy', 'signals': {}}, age=59)
+        self.assertTrue(self.health()['reporting'])
+        self.write({'state': 'stopped', 'signals': {}}, age=3600)       # a clean stop stays true however long ago
+        self.assertEqual((self.health()['state'], self.health()['reporting']), ('stopped', True))
+
+    def test_garbage_gives_unknown_and_never_an_error(self):
+        for raw in ('not json', '[]', '{"state": "healthy"}', '{"time": "yesterday", "state": "healthy"}', '', 'null',
+                    json.dumps({'time': self.now.isoformat(), 'state': 'on fire'}),
+                    json.dumps({'time': 5, 'state': 'healthy'}), '{' * 30000):
+            self.write({}, raw=raw)
+            h = self.health()
+            self.assertEqual((h['state'], h['reporting']), ('unknown', False), raw[:40])
+
+    def test_nothing_unchecked_reaches_the_page(self):
+        import web
+        evil = {'state': 'unhealthy', 'unhealthy_since': 'garbage',
+                'reasons': ['/etc/linemon/router.conf', 'Traceback (most recent call last)', 5, ['x'], 'clock'],
+                'signals': {'threads': {'state': 'unhealthy', 'value': 'Traceback: /opt/linemon/linemon.py line 9'},
+                            'disk': {'state': 'ok', 'value': '<script>alert(1)</script>'},
+                            'clock': {'state': 'bogus', 'value': 'x'},
+                            'router_capture': {'state': 'degraded', 'value': 'the router said: password=hunter2'},
+                            'power': {'state': 'ok', 'value': 7},
+                            'secrets': {'state': 'ok', 'value': 'x'}},
+                'token': 'SECRET-TOKEN', 'extra': {'path': '/var/lib/linemon'}}
+        self.write(evil)
+        h = self.health()
+        text = json.dumps(web.status(self.tmp))
+        for forbidden in ('/etc/linemon', 'Traceback', '/opt/linemon', '<script>', 'hunter2', 'SECRET-TOKEN', '/var/lib', 'secrets'):
+            self.assertNotIn(forbidden, text)
+        self.assertEqual(h['reasons'], ['the clock is unreliable'])          # only the one known reason survived
+        self.assertEqual([(x['name'], x['value']) for x in h['signals']],
+                         [('Measurement threads', ''), ('Power and temperature', ''), ('Disk space', ''), ('Router capture', '')])  # fixed order
+        self.assertIsNone(h['unhealthy_since'])
+
+    def test_every_value_the_monitor_writes_survives_the_filter(self):
+        """The filter must not blank legitimate text: run the real signal code and read it back through the page."""
+        import web
+        args = types.SimpleNamespace(iface='eth0', data=self.tmp, interval=1.0, threshold=3, hook='/opt/linemon/routers/x.py',
+                                     hook_during=30, hook_interval=300, hook_timeout=30)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(lambda: [f.close() for f in (mon.events_f, mon.minute_f) if f])
+        clock = {'elapsed': 0, 'jump': 0.0}
+        mon.wall = lambda: 1e6 + clock['elapsed'] + clock['jump']
+        mon.mono = lambda: 5e3 + clock['elapsed']
+        seen = set()
+        conditions = [
+            dict(ntp='yes', thr='throttled=0x0', free=20e9, stalled=False, errors=0, rows=0, jump=0, hook=0, alive=True),
+            dict(ntp='no', thr='throttled=0x50005', free=900e6, stalled=True, errors=2, rows=4, jump=3600, hook=3, alive=True),
+            dict(ntp='', thr='garbage', free=50e6, stalled=False, errors=0, rows=0, jump=0, hook=0, alive=False),
+        ]
+        for c in conditions:
+            clock['elapsed'] += 15
+            clock['jump'] = c['jump']
+            mon.read_ntp, mon.read_throttled, mon.read_disk = (lambda c=c: c['ntp']), (lambda c=c: c['thr']), (lambda c=c: (c['free'], 32e9))
+            mon.slow_at = None
+            mon.beats = {'gateway': mon.mono() - (100 if c['stalled'] else 0), '1.1.1.1': mon.mono(), 'maintenance': mon.mono()}
+            mon.probe_error_times = [mon.mono()] * c['errors']
+            mon.pending_events = [['t', 'x', 'down', '', '']] * c['rows']
+            mon.hook_failures, mon.hook_alive = c['hook'], (lambda c=c: c['alive'])
+            mon.health_step(t=self.now)
+            for sig in web.read_health(self.tmp, self.now)['signals']:
+                self.assertNotEqual(sig['value'], '', sig)                  # nothing the monitor says was blanked
+                seen.add(sig['name'])
+        self.assertEqual(seen, {label for _, label in web.HEALTH_SIGNALS})  # and every signal was exercised
+
+    def test_through_the_real_api(self):
+        import contextlib
+        import io
+        import urllib.request
+        import web
+        self.write({'state': 'degraded', 'signals': {'router_capture': {'state': 'degraded', 'value': '3 captures in a row reported an error'}}})
+        web.Handler.data_dir = self.tmp
+        server = ThreadingHTTPServer(('127.0.0.1', 0), web.Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/status') as r:
+                body = json.loads(r.read())
+        self.assertEqual((body['health']['state'], body['health']['signals'][0]['name']), ('degraded', 'Router capture'))
+        with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/') as r:
+            page = r.read().decode()
+        for needle in ('id="health-banner"', 'id="health-card"', 'Monitor health', 'Internet status uncertain'):
+            self.assertIn(needle, page)
+
+    def test_the_page_builds_health_with_text_not_html(self):
+        import web
+        start = web.PAGE.index("const hb = document.getElementById('health-banner')")
+        script = web.PAGE[start:web.PAGE.index('// Each section is built off-screen')]
+        self.assertNotIn('innerHTML', script)                              # everything shown goes in through textContent
+
+
+class PageScript(unittest.TestCase):
+    """The page's own JavaScript, run in a fake DOM with Node (skipped where Node isn't installed): the
+    banners and the health card for each state of health.json (issue #43)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import re
+        import shutil as sh
+        import web
+        cls.node = sh.which('node')
+        cls.script = re.search(r'<script>(.*?)</script>', web.PAGE, re.S).group(1)
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest('node is not installed')
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.now = dt.datetime.now().astimezone().replace(microsecond=0)
+        with open(os.path.join(self.tmp, 'events.csv'), 'w') as f:
+            f.write(f'time,target,event,duration_s,detail\n{(self.now - dt.timedelta(hours=1)).isoformat()},monitor,start,,eth0\n')
+        with open(os.path.join(self.tmp, 'minute.csv'), 'w') as f:
+            f.write(f'minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n{self.now.replace(second=0).isoformat()},link,60,0,,\n')
+
+    def page(self, doc=None, raw=None):
+        import subprocess
+        import web
+        path = os.path.join(self.tmp, 'health.json')
+        if doc is not None or raw is not None:
+            with open(path, 'w') as f:
+                f.write(raw if raw is not None else json.dumps(dict({'time': self.now.isoformat()}, **doc)))
+        with open(os.path.join(self.tmp, 'status.json'), 'w') as f:
+            json.dump(web.status(self.tmp), f)
+        with open(os.path.join(self.tmp, 'script.js'), 'w') as f:
+            f.write(self.script)
+        r = subprocess.run([self.node, os.path.join(ROOT, 'tests', 'page_harness.js'), os.path.join(self.tmp, 'script.js'),
+                            os.path.join(self.tmp, 'status.json')], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout)
+
+    def test_no_health_file_shows_nothing_about_health(self):
+        out = self.page()
+        self.assertEqual((out['banner'], out['healthBanner'][0], out['card']), (['banner ok', 'Internet OK'], True, True))
+
+    def test_healthy(self):
+        out = self.page({'state': 'healthy', 'reasons': [], 'signals': {'disk': {'state': 'ok', 'value': '20,000 MB free'}}})
+        self.assertEqual((out['banner'][1], out['healthBanner'][0], out['card'], out['pill'], out['rows']),
+                         ('Internet OK', True, False, ['healthy', 'pill ok'], 1))
+
+    def test_unhealthy_makes_the_internet_status_uncertain(self):
+        out = self.page({'state': 'unhealthy', 'unhealthy_since': (self.now - dt.timedelta(minutes=3)).isoformat(),
+                         'reasons': ['clock', 'disk'], 'signals': {'clock': {'state': 'unhealthy', 'value': 'stepped by +3600 s'}}})
+        self.assertEqual(out['banner'], ['banner warn', "Internet status uncertain: the monitor can't trust its own measurements right now"])
+        self.assertEqual(out['healthBanner'][:2], [False, 'banner sub bad'])
+        self.assertIn('the clock is unreliable; the disk is nearly full', out['healthBanner'][2])
+        self.assertEqual(out['pill'], ['unhealthy', 'pill bad'])
+
+    def test_degraded_names_what_is_degraded_and_keeps_the_internet_status(self):
+        out = self.page({'state': 'degraded', 'reasons': [], 'signals': {
+            'router_capture': {'state': 'degraded', 'value': '3 captures in a row reported an error'}, 'disk': {'state': 'ok', 'value': '5 MB free'}}})
+        self.assertEqual(out['banner'][1], 'Internet OK')
+        self.assertEqual(out['healthBanner'][1:], ['banner sub warn', 'Worth a look: Router capture (3 captures in a row reported an error).'])
+
+    def test_not_reporting_and_stopped_and_unreadable(self):
+        out = self.page({'state': 'healthy', 'signals': {}, 'time': (self.now - dt.timedelta(minutes=5)).isoformat()})
+        self.assertIn('The monitor is not reporting its health (last at', out['healthBanner'][2])
+        self.assertEqual(out['pill'][0], 'not reporting')
+        out = self.page({'state': 'stopped', 'signals': {}, 'time': (self.now - dt.timedelta(hours=2)).isoformat()})
+        self.assertIn('linemon stopped at', out['healthBanner'][2])
+        out = self.page(raw='not json')
+        self.assertEqual((out['healthBanner'][2], out['meta']), ('The monitor is not reporting its health.', 'No readable health report.'))
 
 
 class Trim(unittest.TestCase):
