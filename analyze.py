@@ -502,7 +502,7 @@ def availability(data_dir, lo, hi, now, include_all=False):
         pieces = _subtract([(s, e)], cuts)
         inside = _total(_intersect(_clip([(s, e)], lo, hi), _intersect(monitored, unhealthy)))
         if inside:  # measured, but while the monitor couldn't trust itself: reported apart, not counted
-            unreliable += 1 if lo <= s < hi else 0
+            unreliable += 1  # unlike MTTR and MTBF, this counts what was affected during the period
             unreliable_s += inside
         downtime += _total(_intersect(_clip(pieces, lo, hi), observed))
         if lo <= s < hi and pieces:  # an outage belongs to the period it started in
