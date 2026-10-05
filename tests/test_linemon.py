@@ -1794,6 +1794,53 @@ class Trim(unittest.TestCase):
             self.assertEqual(len(f.readlines()), 1)
         self.assertEqual(os.listdir(os.path.join(data, 'captures')), ['20261001T183000-outage-start'])
 
+    def run_trim(self, data, *extra):
+        import subprocess
+        return subprocess.run([sys.executable, os.path.join(ROOT, 'trim.py'), '--before', '2026-10-01T18:00:00+02:00',
+                               '--data', data, *extra], capture_output=True, text=True)
+
+    def small_data(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        data = os.path.join(tmp, 'linemon')
+        os.makedirs(data)
+        self.events = ('time,target,event,duration_s,detail\n'
+                       '2026-10-01T17:00:00.000+02:00,1.1.1.1,down,,\n'
+                       '2026-10-01T17:00:30.000+02:00,1.1.1.1,up,30,\n')
+        with open(os.path.join(data, 'events.csv'), 'w') as f:
+            f.write(self.events)
+        return tmp, data
+
+    def test_backup_dir(self):
+        tmp, data = self.small_data()
+        elsewhere = os.path.join(tmp, 'usb')
+        os.makedirs(elsewhere)
+        r = self.run_trim(data, '--backup-dir', elsewhere)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        archives = os.listdir(elsewhere)
+        self.assertEqual(len(archives), 1)
+        self.assertTrue(archives[0].startswith('linemon-backup-') and archives[0].endswith('.tar.gz'))
+        self.assertEqual(sorted(os.listdir(tmp)), ['linemon', 'usb'])  # nothing written next to the data
+        import tarfile
+        with tarfile.open(os.path.join(elsewhere, archives[0])) as tar:  # the archive holds the untrimmed data
+            self.assertEqual(tar.extractfile('linemon/events.csv').read().decode(), self.events)
+
+    def test_missing_backup_dir_changes_nothing(self):
+        tmp, data = self.small_data()
+        r = self.run_trim(data, '--backup-dir', os.path.join(tmp, 'not-mounted'))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('does not exist', r.stderr)
+        with open(os.path.join(data, 'events.csv')) as f:
+            self.assertEqual(f.read(), self.events)
+        self.assertEqual(os.listdir(tmp), ['linemon'])
+
+    def test_says_when_the_archive_is_on_the_same_disk(self):
+        tmp, data = self.small_data()
+        r = self.run_trim(data)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('same disk as the data', r.stdout)
+        self.assertIn('--backup-dir', r.stdout)
+
 
 
 class HopProbeMethod(unittest.TestCase):
