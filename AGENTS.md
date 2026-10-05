@@ -66,6 +66,9 @@ default, and their absence is handled gracefully.
 - Check spikes against the principles and boundaries above before starting. If a spike
   finds that a feature can't be built within them, that is a valid result: record it
   and park the feature in the roadmap.
+- Work that goes to `main` without a pull request (for example a fix made during an ISP
+  test) gets an entry in [docs/field-notes.md](docs/field-notes.md) with the decision a
+  pull request would have recorded, and an issue for anything still to check on the Pi.
 - Keep [docs/roadmap.md](docs/roadmap.md) in step: link findings, and move items between
   phases or to *Parked* with the reason.
 
@@ -82,6 +85,7 @@ default, and their absence is handled gracefully.
 | `install.sh` | Installs or upgrades the services; restarts the monitor only if `linemon.py` or its unit changed |
 | `docs/checks.md` | The exact checks, outage rules, hook contract and file formats |
 | `docs/roadmap.md` | Roadmap phases, spikes and parked ideas |
+| `docs/field-notes.md` | What running on a real line showed, and changes made without a pull request |
 | `docs/spikes/` | Spike process, findings template and findings notes |
 | `tests/` | `unittest` suite with sanitised router fixtures and a fake router |
 

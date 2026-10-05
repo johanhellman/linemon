@@ -182,7 +182,10 @@ An ISP may want to watch the line while an "end user device" generates ordinary
 traffic. `tools/browse.py` does that next to the monitor: it visits well-known sites over
 HTTPS at random intervals using the router's DNS, downloads a 20 MB file every 5
 minutes, and logs every request to a CSV. It is a test tool, not part of the monitor:
-run it only for a test agreed with the ISP. It averages under 1 Mbit/s.
+run it only for a test agreed with the ISP. It averages under 1 Mbit/s. A request that fails
+because something other than the site answered (for example the ISP router's own "no
+connection" page during an outage) is logged as `intercepted`, with the address the
+name resolved to.
 
 ```bash
 sudo systemd-run --unit=linemon-browse --uid=$USER --collect --property=RuntimeMaxSec=11400 \
