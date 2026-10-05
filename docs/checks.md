@@ -248,6 +248,17 @@ unhealthy leaves the interval open, the same as an outage: the new `start` ends 
 monitor was unhealthy is unknown, not up, in the same way as time it wasn't running: the analyzer
 takes it out of the availability figures ([Availability](#availability-mtbf-and-mttr)).
 
+**If the monitor hangs.** A stalled thread is reported as unhealthy, but a monitor that is stuck
+can't be trusted to recover by itself, and if its main thread hangs nothing is reported at all.
+So linemon runs under systemd's watchdog (`Type=notify`, `WatchdogSec=90` in `linemon.service`):
+it tells systemd when it has started probing, and then every 5 seconds that every probe thread and
+the maintenance thread has made progress within `stall` seconds. If those messages stop for 90
+seconds, systemd kills the monitor and starts it again. The run that was killed has a `start` row
+and no `stop` row, so the analyzer counts the time from its last data to the new `start` as not
+observed, like any crash. The router capture thread is left out of this: it is an extra, and
+restarting the monitor for it would cost a gap in the measurements; a stopped capture thread is
+*degraded* and restarted inside the monitor.
+
 **On the web page** a banner says when the monitor is unhealthy, since when and why, in fixed
 sentences; the main status then reads "Internet status uncertain" instead of OK or DOWN, because
 it can't be trusted either way. A health card lists every signal. If `health.json` is more than

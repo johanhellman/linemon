@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -798,6 +799,11 @@ class InstallFiles(unittest.TestCase):
         self.assertEqual(exec_start, 'ExecStart=/usr/bin/python3 /opt/linemon/linemon.py $LINEMON_ARGS')  # no flags that shadow the file
         self.assertIn(f'RestartPreventExitStatus={linemon.EX_CONFIG}', unit)
 
+    def test_the_unit_uses_the_watchdog(self):
+        unit = self.read('linemon.service').splitlines()
+        for line in ('Type=notify', 'NotifyAccess=main', 'WatchdogSec=90', 'Restart=always'):
+            self.assertIn(line, unit)
+
     def test_install_checks_the_settings_before_changing_anything(self):
         import subprocess
         script = self.read('install.sh')
@@ -1411,6 +1417,76 @@ class HealthSignals(unittest.TestCase):
             with self.assertRaises(linemon.ConfigError) as cm:
                 linemon.parse_settings(['--config', conf])
             self.assertIn(expect, str(cm.exception))
+
+
+class Watchdog(unittest.TestCase):
+    """systemd restarts a monitor that hangs (issue #42)."""
+
+    setUp = HealthSignals.setUp  # the same controlled monitor, without running HealthSignals' tests again
+
+    def run_briefly(self):
+        mon = self.mon
+        sent = []
+        mon.notify = sent.append
+        mon.supervise_every, mon.health_every = 0.05, 0.15
+        mon.discover_hops, mon.log_path = lambda: False, lambda: None
+        mon.probes = lambda: {'gateway': lambda: (True, 1.0, '192.168.1.1')}
+        mon.wall, mon.mono = time.time, time.monotonic
+        th = threading.Thread(target=mon.run, daemon=True)
+        th.start()
+        time.sleep(0.5)
+        mon.stop.set()
+        th.join(10)
+        self.assertFalse(th.is_alive())
+        return sent
+
+    def test_ready_then_watchdog_then_stopping(self):
+        sent = self.run_briefly()
+        self.assertEqual(sent[0], 'READY=1')
+        self.assertEqual(sent[-1], 'STOPPING=1')
+        self.assertGreater(sent.count('WATCHDOG=1'), 3)
+        self.assertEqual(set(sent), {'READY=1', 'WATCHDOG=1', 'STOPPING=1'})
+
+    def test_no_watchdog_while_a_thread_is_stalled(self):
+        self.mon.stalled_threads = lambda mono: (30, {'gateway': 0}, ['gateway'])
+        self.assertEqual(self.run_briefly(), ['READY=1', 'STOPPING=1'])
+
+    def test_stalled_threads_leaves_out_the_router_capture(self):
+        self.mon.beats = {'gateway': 5_000.0, 'maintenance': 5_000.0, 'hook': 0.0}
+        self.assertEqual(self.mon.stalled_threads(5_010.0)[2], [])
+        self.assertEqual(self.mon.stalled_threads(5_031.0)[2], ['gateway', 'maintenance'])
+
+    def notify_socket(self, path):
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        server.bind(path)
+        server.settimeout(1)
+        self.addCleanup(server.close)
+        return server
+
+    def test_sd_notify(self):
+        d = tempfile.mkdtemp(dir='/tmp')  # short: socket paths are limited to about 100 bytes
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, 'notify')
+        server = self.notify_socket(path)
+        env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(env)))
+        os.environ['NOTIFY_SOCKET'] = path
+        self.assertTrue(linemon.sd_notify('WATCHDOG=1'))
+        self.assertEqual(server.recv(64), b'WATCHDOG=1')
+        os.environ['NOTIFY_SOCKET'] = path + '-gone'
+        self.assertFalse(linemon.sd_notify('WATCHDOG=1'))                # no exception
+        del os.environ['NOTIFY_SOCKET']
+        self.assertFalse(linemon.sd_notify('WATCHDOG=1'))                # not run by systemd
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'abstract sockets are Linux only')
+    def test_sd_notify_abstract_socket(self):
+        name = f'linemon-test-{os.getpid()}'
+        server = self.notify_socket('\0' + name)
+        env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(env)))
+        os.environ['NOTIFY_SOCKET'] = '@' + name
+        self.assertTrue(linemon.sd_notify('READY=1'))
+        self.assertEqual(server.recv(64), b'READY=1')
 
 
 class RealReaders(unittest.TestCase):
