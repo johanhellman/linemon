@@ -265,6 +265,11 @@ sudo systemctl start linemon
 A time without a UTC offset is the monitor's local time. The analyzer and web page then
 count the monitoring period from the cut-off.
 
+The backup archive is written next to the data directory, on the same SD card, so it
+protects against a mistaken trim but not against the card failing; trim.py reminds you
+to copy it off. To write it somewhere else, such as a USB stick or a mounted network
+share, add `--backup-dir /mnt/usb`. If that directory doesn't exist, nothing is changed.
+
 ## Files
 
 Everything is in `/var/lib/linemon`:

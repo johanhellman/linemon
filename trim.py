@@ -10,8 +10,12 @@ directories, and inserts a monitor 'start' event at the cut-off so the analyzer
 and web page count the monitoring period from there. A time without a UTC offset
 is taken as the Pi's local time.
 
-A backup of the whole data directory is written next to it first
-(e.g. /var/lib/linemon-backup-20261001T183000.tar.gz) unless --no-backup is given.
+A backup of the whole data directory is written first, next to it
+(e.g. /var/lib/linemon-backup-20261001T183000.tar.gz) or in --backup-dir, unless
+--no-backup is given. If the archive ends up on the same disk as the data, as it does
+by default on a Pi's SD card, it protects against a mistaken trim but not against the
+card failing, so trim.py says so: copy it off the card, or point --backup-dir at a
+USB stick or network share.
 It refuses to run while the linemon service is active, because the monitor keeps
 its files open and would carry on writing to the deleted copies.
 """
@@ -92,6 +96,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('--before', required=True, help='delete everything before this time, e.g. 2026-10-01T18:00')
     p.add_argument('--data', default='/var/lib/linemon')
+    p.add_argument('--backup-dir', help='where to write the backup archive (default: next to the data directory)')
     p.add_argument('--no-backup', action='store_true')
     p.add_argument('--force', action='store_true', help='run even if the linemon service is active')
     args = p.parse_args()
@@ -102,12 +107,21 @@ def main():
         if shutil.which('systemctl') else False
     if active and not args.force:
         sys.exit('The linemon service is running. Stop it first: sudo systemctl stop linemon')
+    backup_dir = os.path.abspath(args.backup_dir) if args.backup_dir else os.path.dirname(data.rstrip('/'))
+    if not args.no_backup and not os.path.isdir(backup_dir):
+        sys.exit(f'The backup directory {backup_dir} does not exist. Nothing was changed.')
 
     if not args.no_backup:
-        backup = f"{data.rstrip('/')}-backup-{dt.datetime.now():%Y%m%dT%H%M%S}.tar.gz"
+        name = f"{os.path.basename(data.rstrip('/'))}-backup-{dt.datetime.now():%Y%m%dT%H%M%S}.tar.gz"
+        backup = os.path.join(backup_dir, name)
         with tarfile.open(backup, 'w:gz') as tar:
             tar.add(data, arcname=os.path.basename(data))
         print(f'Backup: {backup}')
+        if os.stat(backup).st_dev == os.stat(data).st_dev:
+            print('  It is on the same disk as the data, so it is lost too if the card fails.\n'
+                  '  Copy it off, e.g. from your computer:\n'
+                  f'    scp <user>@<monitor-address>:{backup} .\n'
+                  '  or choose another disk next time with --backup-dir.')
 
     print(f'Deleting data from before {cutoff:%Y-%m-%d %H:%M:%S %z}')
     marker = [cutoff.isoformat(timespec='milliseconds'), 'monitor', 'start', '',
