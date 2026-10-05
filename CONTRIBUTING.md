@@ -13,7 +13,7 @@ Optional body explaining why.
 - **type:** `feat` (new behaviour), `fix` (bug fix), `docs`, `test`, `refactor`, `perf`,
   `style`, `build`, `ci`, `chore` or `revert`.
 - **scope** (optional): the part of linemon it touches: `monitor` (linemon.py),
-  `analyzer`, `web`, `install`, `trim`, `zte_livebox` or another router script, `docs`, `tests`.
+  `analyzer`, `web`, `install`, `trim`, `tools`, `zte_livebox` or another router script, `docs`, `tests`.
 - **description:** imperative and lowercase, e.g. `fix(web): keep the scroll position on refresh`.
 - **breaking changes:** add `!` after the type or scope, e.g. `feat(monitor)!: …`, and
   explain in a `BREAKING CHANGE:` footer.

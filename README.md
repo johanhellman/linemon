@@ -176,6 +176,24 @@ To support another router, write a script that prints one JSON object such as
 `{"ok": false, "summary": "...", "uptime_s": 120}`; the details are in
 [docs/checks.md](docs/checks.md#router-captures).
 
+## Supervised line tests
+
+An ISP may want to watch the line while an "end user device" generates ordinary
+traffic. `tools/browse.py` does that next to the monitor: it visits well-known sites over
+HTTPS at random intervals using the router's DNS, downloads a 20 MB file every 5
+minutes, and logs every request to a CSV. It is a test tool, not part of the monitor:
+run it only for a test agreed with the ISP. It averages under 1 Mbit/s.
+
+```bash
+sudo systemd-run --unit=linemon-browse --uid=$USER --collect --property=RuntimeMaxSec=11400 \
+  python3 ~/linemon/tools/browse.py --out ~/browse.csv --duration 10800
+journalctl -u linemon-browse -f          # follow it (failures are printed)
+python3 ~/linemon/tools/browse.py --summary ~/browse.csv
+```
+
+It stops by itself after `--duration` seconds; `sudo systemctl stop linemon-browse` stops
+it early.
+
 ## Web page
 
 Open `http://<monitor-address>:8080`. It refreshes every 10 seconds and shows:
