@@ -10,6 +10,12 @@ up against linemon's outages afterwards.
   browse.py --out browse.csv --duration 10800      run for 3 hours
   browse.py --summary browse.csv                   summarise a finished run
 
+Each request's result is one of: ok; dns_failed (the name didn't resolve); timeout;
+failed (refused or broken connection); intercepted (something other than the site
+answered: its certificate didn't check out, e.g. the ISP router's own "no
+connection" page while the line is down). The address each name resolved to is
+logged too, so an intercepted request to a private address points at the router.
+
 This is a test tool, not part of the monitor: linemon itself only observes and
 never loads the line. Run it only for a test you have agreed with the ISP. With the
 defaults it averages under 1 Mbit/s (a 20 MB download every 5 minutes plus pages).
@@ -17,6 +23,7 @@ defaults it averages under 1 Mbit/s (a 20 MB download every 5 minutes plus pages
 import argparse
 import csv
 import datetime as dt
+import ipaddress
 import os
 import random
 import signal
@@ -45,8 +52,9 @@ SITES = [
 DOWNLOAD = 'https://speed.cloudflare.com/__down?bytes={bytes}'
 USER_AGENT = ('Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) '
               'Chrome/124.0 Safari/537.36')
-FIELDS = ['time', 'kind', 'url', 'result', 'http_status', 'dns_ms', 'first_byte_ms', 'total_ms',
-          'bytes', 'mbit_s', 'error']
+FIELDS = ['time', 'kind', 'url', 'result', 'http_status', 'address', 'dns_ms', 'first_byte_ms',
+          'total_ms', 'bytes', 'mbit_s', 'error']
+INCIDENT_GAP_S = 45  # failures further apart than this are separate incidents (pages are 5-30 s apart)
 
 
 def now():
@@ -56,13 +64,15 @@ def now():
 def fetch(url, kind, timeout, max_bytes):
     """One request. Returns a log row; never raises."""
     row = {'time': now().isoformat(timespec='seconds'), 'kind': kind, 'url': url, 'result': 'ok',
-           'http_status': '', 'dns_ms': '', 'first_byte_ms': '', 'total_ms': '', 'bytes': 0, 'mbit_s': '',
-           'error': ''}
+           'http_status': '', 'address': '', 'dns_ms': '', 'first_byte_ms': '', 'total_ms': '', 'bytes': 0,
+           'mbit_s': '', 'error': ''}
     host = urllib.parse.urlsplit(url).hostname
     t0 = time.monotonic()
     try:
-        socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
         row['dns_ms'] = round((time.monotonic() - t0) * 1000)
+        # the system resolver caches this answer, so urlopen below connects to the same address
+        row['address'] = next((i[4][0] for i in infos if i[0] == socket.AF_INET), infos[0][4][0])
     except OSError as e:
         row.update(result='dns_failed', error=str(e)[:200], total_ms=round((time.monotonic() - t0) * 1000))
         return row
@@ -83,8 +93,13 @@ def fetch(url, kind, timeout, max_bytes):
                 row['bytes'] += len(chunk)
     except (urllib.error.URLError, OSError, ssl.SSLError) as e:
         reason = getattr(e, 'reason', e)
-        row.update(result='timeout' if isinstance(reason, (socket.timeout, TimeoutError)) or 'timed out' in str(reason)
-                   else 'failed', error=str(reason)[:200])
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            result = 'intercepted'  # e.g. the router's own page with its self-signed certificate
+        elif isinstance(reason, (socket.timeout, TimeoutError)) or 'timed out' in str(reason):
+            result = 'timeout'
+        else:
+            result = 'failed'
+        row.update(result=result, error=str(reason)[:200])
     total = time.monotonic() - t1
     row['total_ms'] = round(total * 1000)
     if kind == 'download' and row['bytes'] and total > 0:
@@ -95,6 +110,14 @@ def fetch(url, kind, timeout, max_bytes):
 def run(args):
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     new = not os.path.exists(args.out) or os.path.getsize(args.out) == 0
+    if not new:
+        with open(args.out, newline='') as f:
+            header = next(csv.reader(f), [])
+        if header != FIELDS:  # written by an older version: keep it, start a new file next to it
+            base, ext = os.path.splitext(args.out)
+            args.out = f'{base}-{now():%Y%m%dT%H%M%S}{ext or ".csv"}'
+            new = True
+            print(f'The existing log has an older format; logging to {args.out} instead', flush=True)
     stop = {'now': False}
     signal.signal(signal.SIGTERM, lambda *_: stop.update(now=True))
     signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
@@ -118,8 +141,8 @@ def run(args):
             f.flush()
             counts['ok' if row['result'] == 'ok' else 'other'] += 1
             if row['result'] != 'ok' or args.verbose:
-                print(f"{row['time'][11:19]} {row['kind']:<8} {row['result']:<10} {row['url'][:50]} {row['error']}",
-                      flush=True)
+                print(f"{row['time'][11:19]} {row['kind']:<8} {row['result']:<11} {row['url'][:50]} "
+                      f"{row['address']} {row['error']}", flush=True)
             wait = random.uniform(args.min_wait, args.max_wait)
             while wait > 0 and not stop['now'] and time.monotonic() < end:
                 time.sleep(min(1, wait))
@@ -143,19 +166,33 @@ def summary(path):
     if downloads:
         print(f'  downloads: {len(downloads)}, median {sorted(downloads)[len(downloads) // 2]} Mbit/s, '
               f'slowest {min(downloads)} Mbit/s')
-    # group failures less than 2 minutes apart into incidents
-    incidents = []
-    for r in fails:
+    # Group failures into incidents. A request that succeeds, or a gap longer than the
+    # 5-30 s between requests allows for, means the line came back in between.
+    incidents, current = [], None
+    for r in rows:
+        if r['result'] == 'ok':
+            current = None
+            continue
         t = dt.datetime.fromisoformat(r['time'])
-        if incidents and (t - incidents[-1]['last']).total_seconds() <= 120:
-            incidents[-1]['last'] = t
-            incidents[-1]['n'] += 1
-            incidents[-1]['kinds'].add(r['result'])
-        else:
-            incidents.append({'first': t, 'last': t, 'n': 1, 'kinds': {r['result']}})
+        if current is None or (t - current['last']).total_seconds() > INCIDENT_GAP_S:
+            current = {'first': t, 'last': t, 'rows': []}
+            incidents.append(current)
+        current['last'] = t
+        current['rows'].append(r)
     for i in incidents:
-        print(f"  failures {i['first']:%d/%m %H:%M:%S} - {i['last']:%H:%M:%S}: {i['n']} requests "
-              f"({', '.join(sorted(i['kinds']))})")
+        kinds = sorted({r['result'] for r in i['rows']})
+        addresses = sorted({r.get('address') or '' for r in i['rows']} - {''})
+        local = [a for a in addresses if is_private(a)]
+        note = f"; answered by local address {', '.join(local)}" if local else ''
+        print(f"  failures {i['first']:%d/%m %H:%M:%S} - {i['last']:%H:%M:%S}: {len(i['rows'])} requests "
+              f"({', '.join(kinds)}){note}")
+
+
+def is_private(address):
+    try:
+        return ipaddress.ip_address(address).is_private
+    except ValueError:
+        return False
 
 
 def main():
