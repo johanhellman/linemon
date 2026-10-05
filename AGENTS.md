@@ -82,6 +82,7 @@ default, and their absence is handled gracefully.
 | `routers/` | Capture hooks for specific ISP routers, e.g. `zte_livebox.py` |
 | `trim.py` | Deletes data from before a given time, with a backup first; only while the monitor is stopped |
 | `tools/browse.py` | Generates ordinary browsing traffic for a test agreed with the ISP; not part of the monitor |
+| `tools/pull.py` | Run on the user's computer: copies the data off the Pi with rsync over SSH, keeping files a trim made smaller |
 | `install.sh` | Installs or upgrades the services; restarts the monitor only if `linemon.py` or its unit changed |
 | `docs/checks.md` | The exact checks, outage rules, hook contract and file formats |
 | `docs/roadmap.md` | Roadmap phases, spikes and parked ideas |
