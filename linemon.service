@@ -8,6 +8,12 @@ After=network-online.target time-sync.target
 # /etc/default/linemon) is added as command-line arguments and overrides the file.
 EnvironmentFile=-/etc/default/linemon
 ExecStart=/usr/bin/python3 /opt/linemon/linemon.py $LINEMON_ARGS
+# The monitor says when it is probing (READY=1), and then every 5 seconds that its probe and
+# maintenance threads are making progress (WATCHDOG=1). If that stops for 90 seconds, systemd
+# kills and restarts it; the analyzer treats the gap like any crash, as time not observed.
+Type=notify
+NotifyAccess=main
+WatchdogSec=90
 Restart=always
 RestartSec=5
 # Exit status 78 means the settings have a mistake: restarting can't fix that, and

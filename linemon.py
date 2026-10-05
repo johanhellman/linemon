@@ -79,6 +79,23 @@ def sh(cmd, timeout=5):
         return ''
 
 
+def sd_notify(message):
+    """Tell systemd something (READY=1, WATCHDOG=1, STOPPING=1) through $NOTIFY_SOCKET. A leading '@'
+    is an abstract socket. Without systemd, or if the socket is gone, it does nothing."""
+    path = os.environ.get('NOTIFY_SOCKET')
+    if not path:
+        return False
+    if path.startswith('@'):
+        path = '\0' + path[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.settimeout(1)
+            s.sendto(message.encode(), path)
+    except OSError:
+        return False
+    return True
+
+
 def default_gateway(iface):
     m = re.search(r'default via (\S+)', sh(['ip', '-4', 'route', 'show', 'default', 'dev', iface]))
     return m.group(1) if m else None
@@ -222,6 +239,7 @@ class Monitor:
         self.supervise_every, self.health_every = 5.0, 15.0  # seconds; shortened by tests
         self.limits = {k: getattr(args, f'health_{k}', d) for k, d in HEALTH_DEFAULTS.items()}
         self.wall, self.mono = time.time, time.monotonic  # replaced by tests
+        self.notify = sd_notify  # replaced by tests
         self.beats = {}  # thread name -> monotonic time of its last pass through its loop
         self.probe_error_times = []
         self.hook_failures = 0  # consecutive router captures that reported an error
@@ -510,15 +528,19 @@ class Monitor:
     def hook_alive(self):
         return self.hook_index is None or self.threads[self.hook_index].is_alive()
 
+    def stalled_threads(self, mono):
+        """Probe and maintenance threads that have stopped making progress (a probe takes about a second,
+        even in an outage). The router capture is left out: it is an extra. Returns (limit, all, stalled)."""
+        stall = max(self.limits['stall'], 3 * self.args.interval + 5)
+        workers = {n: b for n, b in self.beats.items() if n != 'hook'}
+        return stall, workers, sorted(n for n, b in workers.items() if mono - b > stall)
+
     def collect_signals(self, wall, mono):
         """Every signal as name -> (severity, value, reason). Severity is 'ok', 'degraded' (worth
         knowing) or 'unhealthy' (measurements can't be trusted); reason is from a fixed list."""
         lim, sig = self.limits, {}
 
-        # threads that have stopped making progress (a probe takes about a second, even in an outage)
-        stall = max(lim['stall'], 3 * self.args.interval + 5)
-        workers = {n: b for n, b in self.beats.items() if n != 'hook'}
-        stalled = sorted(n for n, b in workers.items() if mono - b > stall)
+        stall, workers, stalled = self.stalled_threads(mono)
         sig['threads'] = (('unhealthy', f'no progress for {stall:g} s: {", ".join(stalled)}', 'probe-stalled') if stalled
                           else ('ok', f'{len(workers)} threads running', None))
 
@@ -674,15 +696,21 @@ class Monitor:
         self.beats.update({name: started for name in [n for n, _ in self.probes().items()] + ['maintenance']})
         for th in threads:
             th.start()
+        self.notify('READY=1')
         next_sample = time.monotonic() + self.health_every
         while not self.stop.wait(self.supervise_every):  # the main thread watches the others, and the health
             self.restart_dead(threads, specs)
+            # systemd's watchdog (WatchdogSec in linemon.service) restarts the service if these stop
+            # coming: when this thread hangs, or a probe or the maintenance thread stays stalled.
+            if not self.stalled_threads(self.mono())[2]:
+                self.notify('WATCHDOG=1')
             if time.monotonic() >= next_sample:
                 next_sample += self.health_every
                 try:
                     self.health_step()
                 except Exception:
                     self.warn('health', f'health check failed:\n{traceback.format_exc()}')
+        self.notify('STOPPING=1')
         for th in threads:
             th.join(timeout=5)
         self.flush_minutes(everything=True)
