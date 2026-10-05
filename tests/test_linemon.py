@@ -1795,5 +1795,58 @@ class Trim(unittest.TestCase):
         self.assertEqual(os.listdir(os.path.join(data, 'captures')), ['20261001T183000-outage-start'])
 
 
+
+class HopProbeMethod(unittest.TestCase):
+    """Each hop is probed the way it answers reliably (seen 05/10/2026: the first ISP hop
+    throttled TTL-exceeded replies to 70 % but answered every ordinary ping)."""
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        args = types.SimpleNamespace(iface='eth0', data=tmp, interval=1.0, threshold=3,
+                                     hook=None, hook_during=30, hook_interval=300, hook_timeout=30)
+        self.patch('default_gateway', lambda iface: '192.168.1.1')
+        self.mon = linemon.Monitor(args)
+        self.addCleanup(lambda: [f.close() for f in (self.mon.events_f, self.mon.minute_f) if f])
+        self.calls = []
+        path = {2: '198.51.100.2', 3: '10.0.0.73'}  # ttl -> router; ttl 4 reaches the target
+
+        def fake_ping(host, iface, ttl=None, timeout=1):
+            self.calls.append((host, ttl))
+            if ttl:
+                who = path.get(ttl, linemon.TRACE_TARGET)
+                return True, None, who
+            if host == '198.51.100.2':
+                return True, 7.0, host        # answers ordinary pings every time
+            return False, None, None          # 10.0.0.73 never answers ordinary pings
+        self.patch('ping', fake_ping)
+
+    def patch(self, name, value):
+        original = getattr(linemon, name)
+        setattr(linemon, name, value)
+        self.addCleanup(setattr, linemon, name, original)
+
+    def test_discovery_picks_ping_or_ttl_per_hop(self):
+        self.assertTrue(self.mon.discover_hops())
+        self.assertEqual(self.mon.hops, {'isp_hop1': (2, '198.51.100.2', 'echo'),
+                                         'isp_hop2': (3, '10.0.0.73', 'ttl')})
+
+    def test_probes_use_the_chosen_method(self):
+        self.mon.discover_hops()
+        probes = self.mon.probes()
+        self.calls.clear()
+        self.assertTrue(probes['isp_hop1']()[0])
+        self.assertTrue(probes['isp_hop2']()[0])
+        self.assertEqual(self.calls, [('198.51.100.2', None), (linemon.TRACE_TARGET, 3)])
+
+    def test_path_log_records_the_method(self):
+        self.patch('sh', lambda cmd, timeout=5: '')
+        self.mon.discover_hops()
+        self.mon.log_path()
+        with open(os.path.join(self.mon.args.data, 'path.log')) as f:
+            line = f.read()
+        self.assertIn('isp_hop1=ttl2:198.51.100.2/echo', line)
+        self.assertIn('isp_hop2=ttl3:10.0.0.73/ttl', line)
+
 if __name__ == '__main__':
     unittest.main()

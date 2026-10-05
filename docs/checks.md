@@ -54,8 +54,25 @@ are written to `path.log`. If discovery fails (for example during an outage), th
 previous path is kept; if there is none yet, discovery is retried every 15 seconds and
 these two targets are not probed until it succeeds.
 
-**Check.** Up if a reply comes back within 1 second, from whichever router is at that
-hop (the address may change if the operator reroutes).
+**How each hop is probed.** Routers differ in what they answer reliably. Some throttle
+the "Time to live exceeded" replies but answer ordinary pings every time; others never
+answer ordinary pings. On 05/10/2026, for example, the first ISP hop answered 42 of 60
+TTL-limited probes but 60 of 60 ordinary pings, and the next router the other way round
+(60 of 60 and 0 of 60). Throttled replies look exactly like a router that has gone
+away, so at discovery linemon sends each hop 5 ordinary pings: if it answers all of them,
+it is probed with ordinary pings to its address from then on; otherwise with the
+TTL-limited probe above. Retrying unanswered probes was considered and rejected: it adds
+traffic exactly when a router is pushing back, and may hit the same limit again.
+
+```
+ping -n -c 1 -W 1 -I eth0 <hop address>          # hop that answers ordinary pings
+ping -n -c 1 -W 1 -I eth0 -t <ttl> 1.1.1.1       # hop that doesn't
+```
+
+**Check.** Up if a reply comes back within 1 second. With the TTL-limited probe the reply
+may come from whichever router is at that hop (the address may change if the operator
+reroutes); with ordinary pings it is the router found at discovery, which is checked again
+hourly.
 
 If the ISP router answers but `isp_hop1` doesn't, the break is between your router and
 the operator's first answering router: the fibre or line, the operator's first
@@ -366,7 +383,8 @@ health](#the-monitors-own-health). Not a history: the history is the `monitor,un
 ### `path.log`
 
 One line at start, after each router change, and hourly: the router, the discovered
-hops (`isp_hop1=ttl4:10.20.30.1`), whether NTP is synchronised, and on a Raspberry Pi
+hops with how each is probed (`isp_hop1=ttl2:10.20.30.1/echo` for ordinary pings,
+`/ttl` for TTL-limited probes), whether NTP is synchronised, and on a Raspberry Pi
 the `vcgencmd get_throttled` value (`0x0` means the power supply has been fine).
 
 ### `captures.jsonl`

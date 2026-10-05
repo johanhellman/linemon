@@ -301,7 +301,7 @@ canvas { width:100%; height:150px; display:block }
       <table class="small"><thead><tr><th>Target</th><th>What it is</th><th>Check</th><th>If only this layer and beyond fail</th></tr></thead><tbody>
         <tr><td class="nw">Cable (link)</td><td>The monitor's own network port</td><td>Carrier state of the port</td><td>The monitor's cable or port</td></tr>
         <tr><td class="nw">ISP router</td><td>The router it is plugged into (e.g. the Livebox)</td><td>Ping to the default gateway</td><td>The router itself, or the cable to it</td></tr>
-        <tr><td class="nw">ISP hop 1</td><td>The first router beyond yours that answers, a few hops into the operator's network</td><td>Ping towards 1.1.1.1 with a limited TTL; the router at that hop must answer "TTL exceeded"</td><td>The access network: fibre/line, or the operator's first equipment</td></tr>
+        <tr><td class="nw">ISP hop 1</td><td>The first router beyond yours that answers, a few hops into the operator's network</td><td>An ordinary ping to that router if it answers them reliably; otherwise a ping towards 1.1.1.1 with a limited TTL, which the router must answer with "TTL exceeded"</td><td>The access network: fibre/line, or the operator's first equipment</td></tr>
         <tr><td class="nw">ISP hop 2</td><td>The next router after hop 1</td><td>Same, one hop further</td><td>Further into the operator's network</td></tr>
         <tr><td class="nw">1.1.1.1, 8.8.8.8, 9.9.9.9</td><td>Cloudflare, Google and Quad9</td><td>Ping each host</td><td>Internet outage when all three fail at once</td></tr>
         <tr><td class="nw">DNS via router / 1.1.1.1</td><td>Name lookups</td><td>Lookup of a random name (no cache can answer) via the router and directly</td><td>Name resolution</td></tr>

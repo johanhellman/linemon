@@ -5,7 +5,8 @@ Once per second it probes, each in its own thread:
 
   link         carrier state of --iface (rules out the Pi's own cable)
   gateway      the ISP router (default gateway on --iface)
-  isp_hop1/2   the first two routers beyond it that answer TTL-limited probes
+  isp_hop1/2   the first two routers beyond it, probed with ordinary pings if they answer
+               them reliably, otherwise with TTL-limited probes
                towards 1.1.1.1 (re-discovered hourly)
   1.1.1.1, 8.8.8.8, 9.9.9.9   internet hosts (ICMP echo)
   dns_gateway, dns_1.1.1.1    cache-busting DNS lookup via the router and directly
@@ -59,6 +60,7 @@ MINUTE_HEADER = ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms']
 HEALTH_FILE = 'health.json'
 MAX_PENDING_MINUTES = 100000  # about a week of per-minute rows kept in memory if minute.csv can't be written
 TRACE_TARGET = '1.1.1.1'
+ECHO_CHECKS = 5  # pings a hop must answer, all of them, to be probed with ordinary pings
 SO_BINDTODEVICE = getattr(socket, 'SO_BINDTODEVICE', 25)
 
 
@@ -207,7 +209,7 @@ class Monitor:
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.gateway = default_gateway(self.iface)
-        self.hops = {}  # 'isp_hop1' -> (ttl, responder)
+        self.hops = {}  # 'isp_hop1' -> (ttl, responder, 'echo' or 'ttl')
         self.stats = {}  # (minute, target) -> [sent, lost, rtt_sum, rtt_n, rtt_max]
         self.down = {}  # target -> currently declared down
         self.target_state = {}  # target -> consecutive failures, first failure, down?, last responder
@@ -389,7 +391,14 @@ class Monitor:
             last_run = time.monotonic()
 
     def discover_hops(self):
-        """Find the first two routers beyond the gateway that answer TTL-limited probes."""
+        """Find the first two routers beyond the gateway, and how to probe each one.
+
+        Routers differ in what they answer reliably: some throttle the "time exceeded"
+        replies that TTL-limited probes rely on, but answer ordinary pings every time
+        (on 05/10/2026 the first ISP hop answered 42/60 TTL-limited probes and 60/60
+        pings), while others never answer pings. A hop that answers every one of
+        ECHO_CHECKS pings is probed with ordinary pings; otherwise with TTL-limited ones.
+        """
         found = []
         for ttl in range(2, 9):
             responder = None
@@ -401,7 +410,8 @@ class Monitor:
             if responder == TRACE_TARGET:
                 break
             if responder:
-                found.append((ttl, responder))
+                answers = sum(ping(responder, self.iface)[0] for _ in range(ECHO_CHECKS))
+                found.append((ttl, responder, 'echo' if answers == ECHO_CHECKS else 'ttl'))
             if len(found) == 2:
                 break
         if found:  # keep the previous path if discovery ran during an outage
@@ -412,7 +422,8 @@ class Monitor:
     def log_path(self):
         ntp = sh(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value']).strip() or '?'
         throttled = sh(['vcgencmd', 'get_throttled']).strip() or 'n/a'
-        hops = ', '.join(f'{name}=ttl{ttl}:{ip}' for name, (ttl, ip) in sorted(self.hops.items())) or 'none found'
+        hops = ', '.join(f'{name}=ttl{ttl}:{ip}/{method}'
+                         for name, (ttl, ip, method) in sorted(self.hops.items())) or 'none found'
         line = f'{iso(now())} gateway={self.gateway} {hops} ntp_synced={ntp} {throttled}\n'
         with open(os.path.join(self.args.data, 'path.log'), 'a') as f:
             f.write(line)
@@ -424,7 +435,10 @@ class Monitor:
             def probe():
                 if name not in self.hops:
                     return None  # not discovered (yet): skip rather than count as failure
-                return ping(TRACE_TARGET, iface, ttl=self.hops[name][0])
+                ttl, address, method = self.hops[name]
+                if method == 'echo':
+                    return ping(address, iface)
+                return ping(TRACE_TARGET, iface, ttl=ttl)
             return probe
 
         targets = {
