@@ -6,6 +6,8 @@ witness for the line, on a stock Raspberry Pi.
 
 Each item starts as a [spike](spikes/README.md): a time-boxed investigation tracked as a GitHub issue
 labelled `spike`. Spikes produce findings and follow-up issues; features are built afterwards.
+What running on a real line has shown, and changes made outside a spike, are in
+[field notes](field-notes.md).
 
 ## Order
 
