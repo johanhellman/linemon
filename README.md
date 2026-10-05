@@ -270,6 +270,49 @@ protects against a mistaken trim but not against the card failing; trim.py remin
 to copy it off. To write it somewhere else, such as a USB stick or a mounted network
 share, add `--backup-dir /mnt/usb`. If that directory doesn't exist, nothing is changed.
 
+## Backing up
+
+The data lives on the Pi's SD card, and SD cards fail. A year of data is about 260 MB,
+so copy it off regularly. Pull it from your own computer or NAS: the Pi then holds no
+credentials for your machine, and a day adds only about 0.6 MB to copy.
+
+`tools/pull.py` does this with rsync over SSH. Run it on your computer, from a copy of
+this repository, with SSH access to the Pi:
+
+```bash
+python3 tools/pull.py <user>@<monitor-address>:/var/lib/linemon ~/linemon-backup
+```
+
+To run it every night, add a line with `crontab -e` (cron works on Linux and macOS; this
+assumes the repository is in `~/linemon`):
+
+```
+30 3 * * * python3 ~/linemon/tools/pull.py <user>@<monitor-address>:/var/lib/linemon ~/linemon-backup >> ~/linemon-backup.log 2>&1
+```
+
+It needs SSH keys set up so it can log in without a password, and rsync on your computer.
+It copies only what was added since the last run, never deletes anything from the
+backup, and checks the copy by running `analyze.py` on it.
+
+**Careful with `trim.py` and mirrors.** Deleting old data makes files on the Pi smaller.
+A plain mirror (for example `rsync --delete`, or `rsync --append`, which also skips a file
+that got smaller) would then lose the trimmed data from the backup too, or keep a stale
+copy. `pull.py` moves any file that got smaller to a dated folder next to the backup
+(`~/linemon-backup-kept-<time>`) before copying, and says so. If you use your own tool,
+make sure it does the same.
+
+**Restoring.** The backup is the same files as on the Pi. To look at the data, run the
+analyzer on the copy (`python3 analyze.py ~/linemon-backup`). To put it back on a new
+card after installing linemon, copy it to the Pi and then, on the Pi:
+
+```bash
+scp -r ~/linemon-backup <user>@<monitor-address>:linemon-backup   # on your computer
+sudo systemctl stop linemon
+sudo cp -a ~/linemon-backup/. /var/lib/linemon/
+sudo chown -R root:root /var/lib/linemon
+sudo systemctl start linemon
+```
+
 ## Files
 
 Everything is in `/var/lib/linemon`:
