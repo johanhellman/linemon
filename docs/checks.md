@@ -116,8 +116,10 @@ These show whether name lookups fail together with the rest, or on their own.
 - **When the monitor wasn't running:** that time is unknown, never counted as up. A run
   that ends with a `stop` row ended there. A run that is followed by a `start` with no `stop`
   (a crash or power cut) is taken to have ended when it was last seen: its last event or
-  the end of its last `minute.csv` row, whichever is later. Outages still open then end
-  there too, so the gap isn't counted as downtime either.
+  the end of its last `minute.csv` row, whichever is later. Only rows for minutes that were
+  over before the restart count: the monitor writes a minute's row once the minute has ended,
+  so a row for the minute of the restart was written by the new run. Outages still open then
+  end there too, so the gap isn't counted as downtime either.
 - **A fault on the Pi is not an outage.** If a probe raises an error on the monitor itself (out of
   file descriptors, a bug), that probe is skipped: it is not counted as a failure, and the error is
   logged to the journal (once a minute at most) and counted. It neither starts nor ends an outage.
@@ -199,7 +201,7 @@ couldn't see is unknown, and is reported next to every figure, never counted as 
 | Term | Meaning |
 |---|---|
 | Period | The time asked about, up to now at most |
-| Monitored | The minutes with a `link` row in `minute.csv`, i.e. when the monitor was running. If there is no `minute.csv`, the monitoring runs from `events.csv` are used. |
+| Monitored | When the monitor was running: the minutes with a `link` row in `minute.csv`, within the runs in `events.csv` (from each `start` to its `stop`, or to where a crashed run was last seen), so the minute in which the monitor stopped or came back counts only for the seconds it ran. If there is no `minute.csv`, the runs alone are used. |
 | Observed | Monitored time minus the time the monitor's own cable was down (`link`) and the time it said it was unhealthy ([health](#the-monitors-own-health)), because nothing it measures then can be trusted |
 | Unknown | Period minus observed: the monitor wasn't running, its own cable was down, or it was unhealthy |
 | Downtime | Internet outages (all three hosts down at once) that fall in observed time. An outage in progress counts up to the end of the data. |
