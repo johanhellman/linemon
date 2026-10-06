@@ -598,6 +598,33 @@ class CrashGap(unittest.TestCase):
         _, periods = analyze.load_outages(self.data(events, [(self.at(0), self.at(12)), (self.at(12, 10), self.at(12, 20))]))
         self.assertEqual(periods, [(self.at(0), self.at(12)), (self.at(12, 10), self.at(12, 20))])
 
+    def test_the_minute_row_of_the_restart_is_not_evidence_for_the_crashed_run(self):
+        """Seen 06/10/2026 when testing the watchdog: a run started 17:15:01, hung and was restarted at
+        17:16:52 without writing anything. The new run's row for minute 17:16 began before the restart,
+        and was taken as proof the hung run was alive until then: 111 s counted as monitored."""
+        t = lambda m, sec: dt.datetime(2026, 10, 6, 17, m, sec, tzinfo=self.TZ)
+        events = [(t(0, 0), 'monitor', 'start'), (t(14, 40), 'monitor', 'stop'),
+                  (t(15, 1), 'monitor', 'start'), (t(16, 52), 'monitor', 'start')]
+        minutes = [(t(0, 0), t(15, 0)), (t(16, 0), t(19, 0))]  # the hung run wrote no rows
+        _, periods = analyze.load_outages(self.data(events, minutes))
+        self.assertEqual(periods[1], (t(15, 1), t(15, 1)))  # nothing shows it ran: none of it is monitored
+        self.assertEqual(periods[2][0], t(16, 52))
+
+    def test_stops_and_restarts_count_to_the_second_in_availability(self):
+        """The same morning: a clean stop at 17:14:40, a start at 17:15:01 that hung, a restart at 17:16:52.
+        The minutes 17:14 and 17:16 have rows, but the monitor ran for only part of each."""
+        t = lambda m, sec: dt.datetime(2026, 10, 6, 17, m, sec, tzinfo=self.TZ)
+        events = [(t(0, 0), 'monitor', 'start'), (t(14, 40), 'monitor', 'stop'),
+                  (t(15, 1), 'monitor', 'start'), (t(16, 52), 'monitor', 'start')]
+        rows = []
+        for m in list(range(0, 15)) + list(range(16, 20)):
+            rows.append(f'{t(m, 0).isoformat()},link,60,0,,\r\n')
+        data = self.data(events)
+        with open(os.path.join(data, 'minute.csv'), 'w', newline='') as f:
+            f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\r\n' + ''.join(rows))
+        a = analyze.availability(data, t(0, 0), t(20, 0), now=t(20, 0))
+        self.assertEqual(a['unknown_s'], 21 + 111)  # 17:14:40-17:15:01 stopped, 17:15:01-17:16:52 hung
+
     def test_a_restart_straight_away_loses_nothing(self):
         events = [(self.at(0), 'monitor', 'start'), (self.at(0, 0), 'monitor', 'start')]
         _, periods = analyze.load_outages(self.data(events))

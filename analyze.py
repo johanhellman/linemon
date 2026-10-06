@@ -234,8 +234,11 @@ def last_minute_before(data_dir, t):
 def crash_end(data_dir, started, last_seen, restart):
     """When a run that ended in a restart with no 'stop' row (a crash or power cut) was last
     known to be running: its latest event or minute row, never before it started or
-    after the restart. The time in between is not monitored, so it is not up."""
-    minute = last_minute_before(data_dir, restart)
+    after the restart. The time in between is not monitored, so it is not up.
+
+    A running monitor writes a minute's row only once that minute is over, so a row whose minute
+    hasn't ended by the restart was written by the next run, not this one."""
+    minute = last_minute_before(data_dir, restart - dt.timedelta(minutes=1))
     evidence = [last_seen or started]
     if minute:
         evidence.append(minute + dt.timedelta(minutes=1))
@@ -531,9 +534,11 @@ def availability(data_dir, lo, hi, now, include_all=False):
     if hi <= lo:
         return None
     open_end = min(hi, data_end)  # what is down at the end of the data is counted up to there
-    monitored = monitored_minutes(data_dir, lo, hi)
-    if monitored is None:
-        monitored = _clip([(s, e or data_end) for s, e in periods], lo, hi)
+    # The runs in events.csv are exact to the second; minute.csv shows which minutes really have data.
+    # A minute row alone would count the whole minute in which the monitor stopped or came back.
+    runs = _clip([(s, e or data_end) for s, e in periods], lo, hi)
+    minutes = monitored_minutes(data_dir, lo, hi)
+    monitored = runs if minutes is None else _intersect(minutes, runs)
     link_down = [(s, e or open_end) for s, e, _ in outages.get('link', [])]
     unhealthy = [(s, e or open_end) for s, e, _ in outages.get('unhealthy', [])]
     # when the cable was down, or the monitor said it couldn't trust itself, nothing it measured counts
