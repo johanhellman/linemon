@@ -136,7 +136,7 @@ These show whether name lookups fail together with the rest, or on their own.
 
 The analyzer and the web page find every period where all three internet hosts were
 down at once. For each one, they check the layers in order and report the first one
-that was also down during that period:
+that was already down when the outage began (see the rules below the table):
 
 | Result | Meaning |
 |---|---|
@@ -146,12 +146,24 @@ that was also down during that period:
 | second ISP hop unreachable | The first operator router answered but the second didn't. |
 | beyond the ISP hops | The router and both hops answered, but the internet hosts didn't: further into the operator's network or beyond. |
 
-The cable and the router answer ordinary probes, so either one counts if it was down at any
-moment of the outage. The two ISP hops are probed with TTL-limited pings, and routers often
-rate-limit those replies, so a hop can show a few seconds of "down" on its own, many times a day.
-A hop therefore counts only if it was **down for at least half of the outage**. On one real line
-hop 1 showed 828 such blips in 65 hours (median 3 s, longest 8 s), while during all 41 internet
-outages it was down for 88 to 100 % of the outage, so the two are easy to tell apart.
+**The cable and the router** answer ordinary probes, so either one counts if it was **already
+down when the outage began**, within 5 seconds (the targets aren't probed in the same instant,
+and each is timed from its first failed probe). If one only goes down later, the outage had
+already started for another reason. On 06/10/2026, for example, a 14-minute outage began with
+the cable and the router fine and the fibre unregistered; near its end the router was restarted
+and its link dropped. Blaming "any moment of the outage" put that outage on the cable.
+
+Such later events aren't hidden: they are listed as **during the outage**, with times (e.g.
+`ISP router not responding 08:11:50-08:12:57; cable link down 08:11:51-08:12:57`), in the
+analyzer's output, its CSV (`during` column) and the web page. They say what was measured, not
+why: a restart, a power cut and a crash look the same. Keep a note of manual restarts if you want
+to explain them later.
+
+**The two ISP hops** count only if they were **down for at least half of the outage**. A hop that
+doesn't answer ordinary pings reliably is probed with TTL-limited pings, and routers often
+rate-limit those replies, so it can show a few seconds of "down" on its own, many times a day. On
+one real line hop 1 showed 828 such blips in 65 hours (median 3 s, longest 8 s), while during all
+41 internet outages it was down for 88 to 100 % of the outage, so the two are easy to tell apart.
 
 ## Configuration
 

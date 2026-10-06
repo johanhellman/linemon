@@ -365,15 +365,27 @@ def overlaps(a_start, a_end, b_start, b_end, tolerance=0):
 
 RATE_LIMITED = ('isp_hop1', 'isp_hop2')
 HOP_SHARE = 0.5  # of an outage a hop must be down to be blamed for it
+START_TOLERANCE_S = 5  # targets aren't probed in the same instant; each is timed from its first failed probe
+DURING_LABELS = {'link': 'cable link down', 'gateway': 'ISP router not responding'}
+
+
+def _started_by(intervals, start, end):
+    """Intervals that overlap the outage and began no later than START_TOLERANCE_S after it."""
+    latest = start + dt.timedelta(seconds=START_TOLERANCE_S)
+    return [(s, e) for s, e in intervals if overlaps(start, end, s, e) and s <= latest]
 
 
 def classify(start, end, outages):
-    """The first layer that was also down during an internet outage.
+    """The layer an internet outage is blamed on: the first in LAYERS that was down when it began.
 
-    The cable and the ISP router answer ordinary probes, so any overlap counts. The two ISP hops are
-    probed with TTL-limited pings, and routers often rate-limit those replies, so a hop can blip for a
-    few seconds on its own (on a real line, hundreds of times a day). A hop only counts if it was down
-    for at least HOP_SHARE of the outage.
+    The cable and the ISP router answer ordinary probes, so either is blamed if it was already down
+    when the outage began (within START_TOLERANCE_S). If one goes down later, the outage had already
+    started for another reason: on 06/10/2026 a 14-minute outage was blamed on the cable because the
+    router was restarted near its end. Such later events are listed by during() instead.
+
+    The two ISP hops are blamed only if they were down for at least HOP_SHARE of the outage. A hop that
+    doesn't answer ordinary pings reliably is probed with TTL-limited pings, which routers often
+    rate-limit, so it can blip for a few seconds on its own (on a real line, hundreds of times a day).
     """
     length = (end - start).total_seconds()
     for target, label in LAYERS:
@@ -381,9 +393,26 @@ def classify(start, end, outages):
         if target in RATE_LIMITED:
             if length > 0 and _total(_clip(intervals, start, end)) >= HOP_SHARE * length:
                 return label
-        elif any(overlaps(start, end, s, e) for s, e in intervals):
+        elif _started_by(intervals, start, end):
             return label
     return 'beyond the ISP hops (router and first hops answered)'
+
+
+def during(start, end, outages):
+    """Cable and ISP router outages that began during an internet outage, after it had started.
+
+    Only what was measured: a restart, a power cut and a crash look the same, so no cause is given.
+    Returns [(label, start, end or None if still down)], in time order.
+    """
+    latest = start + dt.timedelta(seconds=START_TOLERANCE_S)
+    found = [(label, s, e) for target, label in DURING_LABELS.items()
+             for s, e, _ in outages.get(target, []) if latest < s <= end]
+    return sorted(found, key=lambda x: x[1])
+
+
+def describe_during(events):
+    """during() as one line, e.g. 'ISP router not responding 08:11:50-08:12:57'."""
+    return '; '.join(f"{label} {s:%H:%M:%S}-{f'{e:%H:%M:%S}' if e else 'still down'}" for label, s, e in events)
 
 
 def load_udm(paths, window_start, window_end):
@@ -658,7 +687,8 @@ def main():
         rows.append({'start': s.isoformat(timespec='seconds'),
                      'end': '' if ongoing else e.isoformat(timespec='seconds'),
                      'duration_s': round(secs), 'ongoing': 'yes' if ongoing else '',
-                     'layer': layer, 'router': router_during(captures, s, e), 'udm_match': ''})
+                     'layer': layer, 'during': describe_during(during(s, e, outages)),
+                     'router': router_during(captures, s, e), 'udm_match': ''})
     if internet:
         print('\n  Where the path broke:')
         for layer, (n, secs) in sorted(by_layer.items(), key=lambda x: -x[1][0]):
@@ -670,13 +700,15 @@ def main():
         for r in sorted(rows, key=lambda r: -r['duration_s'])[:5]:
             print(f"    {r['start'][:19].replace('T', ' ')}  {fmt_dur(r['duration_s']):>14}  {r['layer']}"
                   + ('  (still in progress)' if r['ongoing'] else ''))
+            if r['during']:
+                print(f"    {'':19}  {'':>14}  during the outage: {r['during']}")
             if r['router']:
                 print(f"    {'':19}  {'':>14}  router said: {r['router']}")
 
     if captures:
         failed = [c for c in captures if c.get('error')]
-        during = [c for c in captures if c.get('reason') in ('outage-start', 'outage-ongoing')]
-        print(f'\nRouter captures: {len(captures)} ({len(during)} during outages, {len(failed)} failed)')
+        outage_captures = [c for c in captures if c.get('reason') in ('outage-start', 'outage-ongoing')]
+        print(f'\nRouter captures: {len(captures)} ({len(outage_captures)} during outages, {len(failed)} failed)')
         if failed:
             print(f"  Last failure: {failed[-1]['time']:%d/%m %H:%M:%S}  {failed[-1]['error']}")
         sessions = session_starts(captures)
@@ -705,7 +737,7 @@ def main():
 
     if args.csv:
         with open(args.csv, 'w', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=['start', 'end', 'duration_s', 'ongoing', 'layer', 'router', 'udm_match'])
+            w = csv.DictWriter(f, fieldnames=['start', 'end', 'duration_s', 'ongoing', 'layer', 'during', 'router', 'udm_match'])
             w.writeheader()
             w.writerows(rows)
         print(f'\nWrote {len(rows)} outages to {args.csv}')

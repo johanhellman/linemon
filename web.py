@@ -176,6 +176,7 @@ def status(data_dir):
         internet_rows.append({'start': iso(s), 'end': None if ongoing else iso(e), 'ongoing': ongoing,
                               'duration_s': round((e - s).total_seconds()),
                               'layer': analyze.classify(s, e, outages),
+                              'during': analyze.describe_during(analyze.during(s, e, outages)),
                               'router': analyze.router_during(captures, s, e)})
     day_ago = now - dt.timedelta(hours=24)
     last_day = [r for r in internet_rows if analyze.parse_time(r['start']) >= day_ago]
@@ -306,9 +307,12 @@ canvas { width:100%; height:150px; display:block }
         <tr><td class="nw">1.1.1.1, 8.8.8.8, 9.9.9.9</td><td>Cloudflare, Google and Quad9</td><td>Ping each host</td><td>Internet outage when all three fail at once</td></tr>
         <tr><td class="nw">DNS via router / 1.1.1.1</td><td>Name lookups</td><td>Lookup of a random name (no cache can answer) via the router and directly</td><td>Name resolution</td></tr>
       </tbody></table>
-      <p class="small muted">"Where it broke" names the first layer that was also down during an internet outage (for the two ISP hops, down for
-        at least half of it: their replies are often rate-limited, so a few seconds of "down" proves nothing).
-        "Beyond the ISP hops" means the router and the first hops answered, but the internet hosts did not.</p>
+      <p class="small muted">"Where it broke" names the first layer that was already down when an internet outage began: the cable or
+        the ISP router if either was down at the start (within a few seconds); an ISP hop if it was down for at least half of the
+        outage, since a hop's replies can be rate-limited and a few seconds of "down" proves nothing. If the cable or the router
+        only went down later, the outage had already started for another reason: that is shown as "during the outage", with
+        times, without guessing why (a restart, a power cut and a crash look the same). "Beyond the ISP hops" means the router
+        and the first hops answered, but the internet hosts did not.</p>
       <p class="small muted">"Monitor health": every 15 seconds the monitor checks that it can trust its own
         measurements: its threads keep making progress, nothing fails on the Pi while probing, data can be written,
         the clock is steady and synchronised, the power supply is steady (on a Raspberry Pi) and the disk isn't
@@ -435,7 +439,8 @@ async function refresh() {
   if (!s.outages.length) ob.appendChild(row(['No internet outages yet.']));
   s.outages.forEach(o => {
     const tr = row([fmtTime(o.start), o.ongoing ? 'ongoing' : fmtTime(o.end), fmtDur(o.duration_s),
-      o.ongoing ? 'in progress: ' + o.layer : o.layer, o.router], ['nw', 'nw', 'num nw', '', '']);
+      (o.ongoing ? 'in progress: ' + o.layer : o.layer) + (o.during ? ' (during the outage: ' + o.during + ')' : ''),
+      o.router], ['nw', 'nw', 'num nw', '', '']);
     if (o.ongoing) tr.className = 'ongoing';
     ob.appendChild(tr);
   });

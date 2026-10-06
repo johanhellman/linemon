@@ -1787,10 +1787,36 @@ class PathClassification(unittest.TestCase):
     def test_the_second_hop_when_the_first_was_only_a_blip(self):
         self.assertEqual(self.classify(isp_hop1=[(10, 14)], isp_hop2=[(0, 580)]), self.SECOND)
 
-    def test_the_cable_and_the_router_need_only_to_overlap(self):
-        self.assertEqual(self.classify(link=[(300, 304)], isp_hop1=[(0, 600)]), 'monitor cable/port down')
-        self.assertEqual(self.classify(gateway=[(599, 603)], isp_hop1=[(0, 600)]), 'ISP router not responding')
+    def test_the_cable_and_the_router_are_blamed_if_down_when_it_began(self):
+        self.assertEqual(self.classify(link=[(-2, 30)], isp_hop1=[(0, 600)]), 'monitor cable/port down')  # 2 s before
+        self.assertEqual(self.classify(gateway=[(0, 600)], isp_hop1=[(0, 600)]), 'ISP router not responding')  # same time
+        self.assertEqual(self.classify(gateway=[(5, 20)], isp_hop1=[(0, 600)]), 'ISP router not responding')   # tolerance
+        self.assertEqual(self.classify(gateway=[(-300, None)]), 'ISP router not responding')  # down long before, still down
+
+    def test_the_cable_or_router_going_down_later_is_not_blamed(self):
+        self.assertEqual(self.classify(link=[(300, 304)], isp_hop1=[(0, 600)]), self.ACCESS)
+        self.assertEqual(self.classify(gateway=[(599, 603)], isp_hop1=[(0, 600)]), self.ACCESS)
+        self.assertEqual(self.classify(gateway=[(6, 20)]), self.BEYOND)                  # just past the tolerance
         self.assertEqual(self.classify(gateway=[(700, 710)]), self.BEYOND)               # no overlap at all
+        self.assertEqual(self.classify(gateway=[(-60, -10)]), self.BEYOND)               # over before it began
+
+    def test_the_morning_of_06_10(self):
+        """Internet down 07:57:16-08:13:21 with the fibre unregistered; the router was restarted at 08:11:50."""
+        t = lambda hms: dt.datetime.fromisoformat(f'2026-10-06T{hms}+02:00')
+        outages = {'link': [(t('08:11:51'), t('08:12:57'), False)],
+                   'gateway': [(t('08:11:50'), t('08:12:58'), False)],
+                   'isp_hop1': [(t('07:57:16'), t('08:13:21'), False)]}
+        start, end = t('07:57:16'), t('08:13:21')
+        self.assertEqual(analyze.classify(start, end, outages), self.ACCESS)
+        self.assertEqual(analyze.describe_during(analyze.during(start, end, outages)),
+                         'ISP router not responding 08:11:50-08:12:58; cable link down 08:11:51-08:12:57')
+
+    def test_during_lists_only_what_began_after_the_start(self):
+        outages = self.outages(link=[(-2, 30)], gateway=[(200, None)])
+        events = analyze.during(self.at(0), self.at(600), outages)
+        self.assertEqual([(label, s) for label, s, _ in events], [('ISP router not responding', self.at(200))])
+        self.assertIn('still down', analyze.describe_during(events))
+        self.assertEqual(analyze.during(self.at(0), self.at(600), self.outages(gateway=[(700, 710)])), [])
 
     def test_nothing_down_is_beyond_the_hops(self):
         self.assertEqual(self.classify(), self.BEYOND)
