@@ -72,6 +72,14 @@ tail -n 1 /var/lib/linemon/path.log
 
 This should show the ISP router as `gateway`, with `isp_hop1` and `isp_hop2` filled in.
 
+To install a specific release instead of the latest code, check out its tag first
+(`git checkout v0.1.0`), or download the archive from the
+[releases page](https://github.com/johanhellman/linemon/releases), check it against its
+`.sha256` file (`sha256sum -c linemon-0.1.0.tar.gz.sha256`), unpack it and run
+`sudo ./install.sh` in it. The installed version is shown at the bottom of the web page, by
+`/opt/linemon/linemon.py --version`, and in each `start` row of `events.csv`, so evidence
+always says which version produced it.
+
 To upgrade, pull and run `sudo ./install.sh` again. The monitor is only restarted if
 `linemon.py` or its service file changed, so upgrading the page or the analyzer doesn't
 interrupt the measurements. The upgrade checks your settings first, and stops without

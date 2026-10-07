@@ -1759,10 +1759,11 @@ class StaticChecks(unittest.TestCase):
         defined nowhere in the file, such as a missing import."""
         import ast
         import builtins
-        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', os.path.join('routers', 'zte_livebox.py')):
+        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', os.path.join('routers', 'zte_livebox.py'),
+                     os.path.join('tools', 'pull.py'), os.path.join('tools', 'browse.py')):
             with open(os.path.join(ROOT, name)) as f:
                 tree = ast.parse(f.read())
-            defined = set(dir(builtins))
+            defined = set(dir(builtins)) | {'__file__'}  # set in every module that is loaded from a file
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     defined.update((a.asname or a.name).split('.')[0] for a in node.names)
@@ -1919,6 +1920,65 @@ class HealthOnThePage(unittest.TestCase):
         start = web.PAGE.index("const hb = document.getElementById('health-banner')")
         script = web.PAGE[start:web.PAGE.index('// Each section is built off-screen')]
         self.assertNotIn('innerHTML', script)                              # everything shown goes in through textContent
+
+
+class Versions(unittest.TestCase):
+    """Evidence states the linemon version that produced it (spike #17)."""
+
+    def version_in(self, text):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        if text is not None:
+            with open(os.path.join(tmp, 'VERSION'), 'w') as f:
+                f.write(text)
+        return linemon.version(tmp), analyze.version(tmp)
+
+    def test_read_from_the_installed_version_file(self):
+        self.assertEqual(self.version_in('0.1.0-3-gabc1234\n'), ('0.1.0-3-gabc1234', '0.1.0-3-gabc1234'))
+        self.assertEqual(self.version_in('v0.2.0\n')[0], '0.2.0')
+        self.assertEqual(self.version_in('0.1.0 <b>/etc/x</b>\n')[0], '0.1.0betcxb')  # nothing a page would render
+        self.assertEqual(self.version_in(None), ('unknown', 'unknown'))                 # never guessed
+
+    def test_a_checkout_uses_git(self):
+        if not shutil.which('git') or not os.path.isdir(os.path.join(ROOT, '.git')):
+            self.skipTest('needs a git checkout')
+        import subprocess
+        described = subprocess.run(['git', '-C', ROOT, 'describe', '--tags', '--always', '--dirty'],
+                                   capture_output=True, text=True).stdout.strip().removeprefix('v')
+        self.assertEqual(linemon.version(ROOT), described)
+
+    def test_the_monitor_start_row_and_the_page_carry_it(self):
+        import web
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        args = types.SimpleNamespace(iface='eth0', data=tmp, interval=1.0, threshold=3,
+                                     hook=None, hook_during=30, hook_interval=300, hook_timeout=30)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.0.2.1'
+        try:
+            mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(lambda: [f.close() for f in (mon.events_f, mon.minute_f) if f])
+        mon.discover_hops, mon.log_path, mon.probes = (lambda: False), (lambda: None), (lambda: {})
+        mon.notify = lambda message: None
+        mon.supervise_every = 0.05
+        th = threading.Thread(target=mon.run, daemon=True)
+        th.start()
+        time.sleep(0.2)
+        mon.stop.set()
+        th.join(5)
+        with open(os.path.join(tmp, 'events.csv')) as f:
+            start = next(line for line in f if ',monitor,start,' in line)
+        self.assertIn(f'version={linemon.version()}', start)
+        self.assertEqual(web.status(tmp)['version'], analyze.version())
+
+    def test_install_writes_the_exact_version(self):
+        with open(os.path.join(ROOT, 'install.sh')) as f:
+            script = f.read()
+        self.assertIn('safe.directory', script)          # git as root in a user's clone
+        self.assertIn('> /opt/linemon/VERSION', script)
+        self.assertLess(script.index('install -m 755 linemon.py'), script.index('> /opt/linemon/VERSION'))
 
 
 class StatusCache(unittest.TestCase):

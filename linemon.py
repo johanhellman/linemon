@@ -39,6 +39,7 @@ import argparse
 import configparser
 import csv
 import datetime as dt
+import functools
 import json
 import os
 import random
@@ -66,6 +67,28 @@ SO_BINDTODEVICE = getattr(socket, 'SO_BINDTODEVICE', 25)
 
 def now():
     return dt.datetime.now().astimezone()
+
+
+@functools.lru_cache(maxsize=None)
+def version(directory=os.path.dirname(os.path.abspath(__file__))):
+    """The linemon version that is running, as evidence states it: `git describe` in a checkout, or
+    the VERSION file that install.sh writes next to the installed scripts (e.g. 0.1.0, or
+    0.1.0-3-gabc1234 for an install between releases). Never guessed: 'unknown' if neither is there."""
+    text = ''
+    if os.path.isdir(os.path.join(directory, '.git')):
+        try:
+            text = subprocess.run(['git', '-C', directory, 'describe', '--tags', '--always', '--dirty'],
+                                  capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not text:
+        try:
+            with open(os.path.join(directory, 'VERSION')) as f:
+                text = f.read().strip()
+        except OSError:
+            pass
+    text = re.sub(r'[^A-Za-z0-9.+-]', '', text.removeprefix('v'))[:40]  # shown on a page with no login
+    return text or 'unknown'
 
 
 def iso(t):
@@ -689,7 +712,7 @@ class Monitor:
     def run(self):
         self.discover_hops()
         self.log_path()
-        self.event(now(), 'monitor', 'start', '', f'iface={self.iface} gateway={self.gateway}')
+        self.event(now(), 'monitor', 'start', '', f'iface={self.iface} gateway={self.gateway} version={version()}')
         specs = [(self.run_target, (n, p)) for n, p in self.probes().items()] + [(self.maintenance, ())]
         if self.args.hook:
             specs.append((self.hook_loop, ()))
@@ -824,6 +847,7 @@ def build_parser(file_values, config_path=CONFIG_PATH):
     p.add_argument('--config', default=config_path, help=f'settings file (default {config_path})')
     p.add_argument('--env-file', default=ENV_PATH, help=f'systemd environment file with LINEMON_ARGS (default {ENV_PATH})')
     p.add_argument('--check-config', action='store_true', help='check the settings the service would use, then exit')
+    p.add_argument('--version', action='version', version=f'linemon {version()}')
     p.add_argument('--migrate', action='store_true',
                    help='print a linemon.conf equivalent to LINEMON_ARGS in --env-file, then exit; changes nothing')
     p.set_defaults(**file_values)  # the file overrides the defaults; real arguments override the file

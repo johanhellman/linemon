@@ -198,6 +198,7 @@ def status(data_dir):
     return {
         'router_status': router_status,
         'now': iso(now),
+        'version': analyze.version(),
         'monitoring_since': iso(periods[0][0]) if periods else None,
         'router': change['detail'].split('->')[-1].strip() if change else None,
         'last_data': iso(last_data),
@@ -415,7 +416,7 @@ async function refresh() {
   catch (e) { document.getElementById('meta').textContent = 'Cannot reach the monitor: ' + e; return; }
 
   document.getElementById('meta').textContent =
-    `Monitoring since ${fmtTime(d.monitoring_since)} · router ${d.router || '?'} · last data ${fmtTime(d.last_data)} · updated ${fmtTime(d.now)}`;
+    `Monitoring since ${fmtTime(d.monitoring_since)} · router ${d.router || '?'} · last data ${fmtTime(d.last_data)} · updated ${fmtTime(d.now)} · linemon ${d.version || '?'}`;
   const b = document.getElementById('banner'), h = d.health;
   if (d.stale) { b.className = 'banner warn'; b.textContent = 'No new measurements for over 3 minutes: is the monitor running?'; }
   else if (h && h.reporting && h.state === 'unhealthy') {

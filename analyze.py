@@ -20,6 +20,7 @@ import argparse
 import bisect
 import csv
 import datetime as dt
+import functools
 import io
 import json
 import os
@@ -41,6 +42,28 @@ UDM_RE = re.compile(r'^(\S+) .*wan-failover-group-base: wf-group-1-single is (up
 
 def parse_time(s):
     return dt.datetime.fromisoformat(s)
+
+
+@functools.lru_cache(maxsize=None)
+def version(directory=os.path.dirname(os.path.abspath(__file__))):
+    """The linemon version that is running, as evidence states it: `git describe` in a checkout, or
+    the VERSION file that install.sh writes next to the installed scripts (e.g. 0.1.0, or
+    0.1.0-3-gabc1234 for an install between releases). Never guessed: 'unknown' if neither is there."""
+    text = ''
+    if os.path.isdir(os.path.join(directory, '.git')):
+        try:
+            text = subprocess.run(['git', '-C', directory, 'describe', '--tags', '--always', '--dirty'],
+                                  capture_output=True, text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not text:
+        try:
+            with open(os.path.join(directory, 'VERSION')) as f:
+                text = f.read().strip()
+        except OSError:
+            pass
+    text = re.sub(r'[^A-Za-z0-9.+-]', '', text.removeprefix('v'))[:40]  # shown on a page with no login
+    return text or 'unknown'
 
 
 def fmt_dur(seconds):
@@ -679,6 +702,7 @@ def print_availability(a):
 def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('data', help='linemon data directory (with events.csv)')
+    p.add_argument('--version', action='version', version=f'linemon {version()}')
     p.add_argument('--udm', nargs='+', default=[], help='UniFi support export folder(s) or messages files')
     p.add_argument('--tolerance', type=int, default=15, help='seconds of slack when matching UDM outages')
     p.add_argument('--csv', help='write internet outages to this CSV file')
@@ -689,6 +713,7 @@ def main():
                    help='end of the availability period (default: the start of next month, or now if earlier)')
     args = p.parse_args()
 
+    print(f'linemon {version()}')
     change = router_change(load_events(args.data))
     if change and not args.all:
         print(f"Using data since the router changed at {parse_time(change['time']):%d/%m %H:%M} "
