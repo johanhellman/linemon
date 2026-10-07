@@ -1855,8 +1855,32 @@ class PathClassification(unittest.TestCase):
                  if analyze.classify(self.at(off), self.at(off + 78), self.outages(isp_hop1=blips)) == self.ACCESS]
         self.assertEqual(wrong, [])
         # and when hop 1 really is down for the length of the outage, it is
-        real = blips + [(5000, 5080)]
+        real = sorted(blips + [(5000, 5080)])  # in time order, as load_outages gives them
         self.assertEqual(analyze.classify(self.at(5000), self.at(5078), self.outages(isp_hop1=real)), self.ACCESS)
+
+    def test_a_targets_outages_are_in_time_order_and_never_overlap(self):
+        """classify() finds a hop's outages by bisection, which relies on this. Messy input: a row written
+        twice, a crash with outages open, an outage open at the end."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        rows = [(0, 'monitor', 'start'), (10, 'isp_hop1', 'down'), (13, 'isp_hop1', 'up'),
+                (20, 'isp_hop1', 'down'), (20, 'isp_hop1', 'down'),            # written twice after a failed write
+                (25, 'isp_hop1', 'up'), (25, 'isp_hop1', 'up'), (40, 'isp_hop1', 'down'),
+                (60, 'monitor', 'start'),                                      # crash with hop 1 still down
+                (70, 'isp_hop1', 'down'), (75, 'isp_hop1', 'up'), (90, 'isp_hop1', 'down')]  # open at the end
+        with open(os.path.join(tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n')
+            f.writelines(f'{self.at(t).isoformat()},{target},{kind},,\n' for t, target, kind in rows)
+        hop = analyze.load_outages(tmp)[0]['isp_hop1']
+        for (s1, e1, _), (s2, e2, _) in zip(hop, hop[1:]):
+            self.assertLessEqual(s1, e1)
+            self.assertLessEqual(e1, s2)
+        self.assertEqual([(s, e) for s, e, _ in hop][-1], (self.at(90), None))
+        # and bisection finds the same as a scan, at every offset
+        for off in range(0, 100, 3):
+            lo, hi = self.at(off), self.at(off + 7)
+            scan = [(s, e or hi) for s, e, _ in hop if (e or hi) >= lo and s <= hi]
+            self.assertEqual(analyze._overlapping(hop, lo, hi), scan, off)
 
     def test_the_page_uses_the_same_rule(self):
         import web

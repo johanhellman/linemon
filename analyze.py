@@ -18,6 +18,7 @@ shows every time its internet session was (re)established.
 """
 import argparse
 import bisect
+import bisect
 import csv
 import datetime as dt
 import io
@@ -372,6 +373,22 @@ START_TOLERANCE_S = 5  # targets aren't probed in the same instant; each is time
 DURING_LABELS = {'link': 'cable link down', 'gateway': 'ISP router not responding'}
 
 
+FAR_FUTURE = dt.datetime.max.replace(tzinfo=dt.timezone.utc)
+
+
+def _overlapping(items, lo, hi):
+    """One target's outages [(start, end, truncated)] that overlap [lo, hi], as (start, end or hi).
+
+    Found by bisection, not by a scan: classify() runs once per internet outage, and a hop can have
+    thousands of short outages (4,700 on one line in five days), which made the page take seconds.
+    A target's outages follow one another, in time order and never overlapping (see load_outages),
+    so both their starts and their ends are sorted.
+    """
+    i = bisect.bisect_left(items, lo, key=lambda x: x[1] or FAR_FUTURE)  # first that hasn't ended before lo
+    j = bisect.bisect_right(items, hi, key=lambda x: x[0])                # last that started by hi
+    return [(s, e or hi) for s, e, _ in items[i:j]]
+
+
 def _started_by(intervals, start, end):
     """Intervals that overlap the outage and began no later than START_TOLERANCE_S after it."""
     latest = start + dt.timedelta(seconds=START_TOLERANCE_S)
@@ -392,7 +409,7 @@ def classify(start, end, outages):
     """
     length = (end - start).total_seconds()
     for target, label in LAYERS:
-        intervals = [(s, e or end) for s, e, _ in outages.get(target, [])]
+        intervals = _overlapping(outages.get(target, []), start, end)
         if target in RATE_LIMITED:
             if length > 0 and _total(_clip(intervals, start, end)) >= HOP_SHARE * length:
                 return label
