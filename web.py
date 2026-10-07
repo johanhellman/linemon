@@ -4,7 +4,8 @@
   web.py [--data /var/lib/linemon] [--port 8080]
 
 Serves / (the page) and /api/status (JSON). The page refreshes itself every
-10 seconds. Uses the same outage logic as analyze.py.
+10 seconds; the JSON is worked out at most once per 10 seconds and data change,
+however many pages are open. Uses the same outage logic as analyze.py.
 """
 import argparse
 import csv
@@ -12,6 +13,8 @@ import datetime as dt
 import json
 import os
 import re
+import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -212,6 +215,40 @@ def status(data_dir):
         'series': minute_series(data_dir, day_ago),
         'events': recent,
     }
+
+
+# /api/status is worked out at most once per CACHE_MAX_AGE seconds and data change, however many
+# pages are open: anything newer would show nothing new, as the monitor writes every 15 s. It is never
+# kept longer, because parts of it depend on the time (an ongoing outage's length, stale data, a
+# health file that has stopped changing): a monitor that has stopped must show as stopped.
+CACHE_MAX_AGE = 10
+CACHE_FILES = ('events.csv', 'minute.csv', 'captures.jsonl', 'health.json')
+_cache = {'key': None, 'at': None, 'body': None}
+_cache_lock = threading.Lock()
+clock = time.monotonic  # replaced by tests
+
+
+def _signature(data_dir):
+    sig = [data_dir]
+    for name in CACHE_FILES:
+        try:
+            st = os.stat(os.path.join(data_dir, name))
+            sig.append((st.st_ino, st.st_size, st.st_mtime_ns))
+        except FileNotFoundError:
+            sig.append(None)
+    return tuple(sig)
+
+
+def status_body(data_dir):
+    """status() as JSON, shared by every request within CACHE_MAX_AGE while no data file changes.
+    Requests that arrive while it is being worked out wait for that answer instead of repeating it."""
+    with _cache_lock:
+        key, t = _signature(data_dir), clock()
+        if _cache['key'] == key and t - _cache['at'] < CACHE_MAX_AGE:
+            return _cache['body']
+        body = json.dumps(status(data_dir)).encode()  # an error is raised, not kept
+        _cache.update(key=key, at=t, body=body)
+        return body
 
 
 PAGE = """<!doctype html>
@@ -487,8 +524,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, 'text/html; charset=utf-8', PAGE.encode())
         elif path == '/api/status':
             try:
-                body = json.dumps(status(self.data_dir)).encode()
-                self.send(200, 'application/json', body)
+                self.send(200, 'application/json', status_body(self.data_dir))
             except FileNotFoundError:
                 self.send(503, 'application/json', json.dumps({'error': 'no data yet'}).encode())
             except Exception:
