@@ -27,7 +27,12 @@ TEXT = {
         'availability': 'Availability (of observed time)', 'longest': 'Longest outage',
         'mttr': 'Mean time to recovery (MTTR)', 'mtbf': 'Mean time between failures (MTBF)',
         'none': 'none', 'low_confidence': 'More than 1 % of the period is unknown: the figures are less certain.',
-        'where': 'Where the path broke', 'count': 'Outages',
+        'where': 'Where the path broke', 'count': 'Outages', 'time': 'Time',
+        'states': 'What the ISP router reported during these outages', 'share': 'Share',
+        'states_note': 'Time in each state the router reported, summed over the outages listed below. A state '
+                       'counts from the capture that first saw it until the next state was seen, so the times are '
+                       'precise to about 30 s.',
+        'not_captured': 'not known (before the first capture of an outage, or captures failed)',
         'list': 'Outages', 'start': 'Start', 'end': 'End', 'duration': 'Duration', 'layer': 'Where it broke',
         'router': 'What the ISP router reported', 'during': 'During the outage', 'ongoing': 'ongoing',
         'no_outages': 'No internet outages in this period.',
@@ -53,7 +58,12 @@ TEXT = {
         'availability': 'Disponibilidad (del tiempo observado)', 'longest': 'Corte más largo',
         'mttr': 'Tiempo medio de recuperación (MTTR)', 'mtbf': 'Tiempo medio entre fallos (MTBF)',
         'none': 'ninguno', 'low_confidence': 'Más del 1 % del periodo es desconocido: las cifras son menos seguras.',
-        'where': 'Dónde se cortó', 'count': 'Cortes',
+        'where': 'Dónde se cortó', 'count': 'Cortes', 'time': 'Tiempo',
+        'states': 'Qué indicaba el router del operador durante estos cortes', 'share': 'Proporción',
+        'states_note': 'Tiempo en cada estado que indicaba el router, sumado sobre los cortes de la lista. Un estado '
+                       'cuenta desde la lectura que lo vio por primera vez hasta que se vio el siguiente, así que '
+                       'los tiempos tienen una precisión de unos 30 s.',
+        'not_captured': 'desconocido (antes de la primera lectura de un corte, o lecturas fallidas)',
         'list': 'Cortes', 'start': 'Inicio', 'end': 'Fin', 'duration': 'Duración', 'layer': 'Dónde se cortó',
         'router': 'Qué indicaba el router del operador', 'during': 'Durante el corte', 'ongoing': 'en curso',
         'no_outages': 'No hubo cortes de internet en este periodo.',
@@ -114,7 +124,8 @@ def outages_in(data_dir, lo, hi, now):
             rows.append({'start': s, 'end': None if ongoing else e, 'duration_s': (e - s).total_seconds(),
                          'layer': analyze.classify(s, e, outages),
                          'during': analyze.describe_during(analyze.during(s, e, outages)),
-                         'router': analyze.router_during(captures, s, e)})
+                         'router': analyze.router_during(captures, s, e),
+                         'states': analyze.router_states(captures, s, e)[0]})
     return rows
 
 
@@ -161,6 +172,19 @@ def render(data_dir, lo, hi, lang='en', now=None):
         out.append(f'<h2>{esc(t["where"])}</h2><table><tr><th></th><th>{esc(t["count"])}</th></tr>')
         out += [f'<tr><td>{esc(layer)}</td><td class="num">{n}</td></tr>'
                 for layer, n in sorted(by_layer.items(), key=lambda x: -x[1])]
+        out.append('</table>')
+    in_state = {}  # summary -> seconds, over the outages listed
+    for r in rows:
+        for summary, seen, until in r['states']:
+            in_state[summary] = in_state.get(summary, 0) + (until - seen).total_seconds()
+    if in_state:
+        total = sum(r['duration_s'] for r in rows)
+        in_state[None] = max(0.0, total - sum(in_state.values()))
+        out.append(f'<h2>{esc(t["states"])}</h2><p class="small">{esc(t["states_note"])}</p>'
+                   f'<table><tr><th></th><th>{esc(t["time"])}</th><th>{esc(t["share"])}</th></tr>')
+        out += [f'<tr><td>{esc(summary or t["not_captured"])}</td><td class="num nw">{esc(analyze.fmt_dur(secs))}</td>'
+                f'<td class="num">{pct(secs / total, lang, 1)}</td></tr>'
+                for summary, secs in sorted(in_state.items(), key=lambda x: (x[0] is None, -x[1])) if secs >= 0.5]
         out.append('</table>')
     out.append(f'<h2>{esc(t["list"])}</h2>')
     if rows:
