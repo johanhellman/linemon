@@ -30,6 +30,15 @@ install -d /opt/linemon /opt/linemon/routers /var/lib/linemon
 [ -d /etc/linemon ] || install -d -m 700 /etc/linemon
 install -m 644 linemon.conf.example /etc/linemon/linemon.conf.example
 install -m 755 linemon.py analyze.py web.py trim.py /opt/linemon/
+# The exact version installed, read by the scripts and stated in evidence: a release (0.1.0) or, from a
+# git checkout between releases, what git describes (0.1.0-3-gabc1234). Run as root in a user's clone,
+# git needs to be told the directory is safe.
+version=$(cat VERSION)
+if [ -d .git ] && described=$(git -c safe.directory="$PWD" describe --tags --always --dirty 2>/dev/null); then
+    version=${described#v}
+fi
+printf '%s\n' "$version" > /opt/linemon/VERSION
+chmod 644 /opt/linemon/VERSION
 install -m 755 routers/*.py /opt/linemon/routers/
 install -m 644 linemon.service linemon-web.service /etc/systemd/system/
 systemctl daemon-reload
@@ -40,6 +49,7 @@ systemctl restart linemon-web
 sleep 2
 address=$(ip -4 -o addr show dev eth0 | awk '{split($4, a, "/"); print a[1]; exit}')
 echo
+echo "Version:  $version"
 echo "Monitor:  $(systemctl is-active linemon)$([ "$restart_monitor" = no ] && echo ' (unchanged, kept running)')"
 echo "Web page: $(systemctl is-active linemon-web) at http://${address:-<pi-address>}:8080"
 echo "NTP synchronised: $(timedatectl show -p NTPSynchronized --value)"

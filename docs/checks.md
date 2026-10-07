@@ -419,7 +419,7 @@ time or target.
 | `target` | `link`, `gateway`, `isp_hop1`, `isp_hop2`, `1.1.1.1`, `8.8.8.8`, `9.9.9.9`, `dns_gateway`, `dns_1.1.1.1`, or `monitor` |
 | `event` | `down` or `up` for targets. `start`, `stop`, `gateway` (router changed), `unhealthy` or `healthy` for `monitor`. |
 | `duration_s` | On `up` rows: seconds since the first failed probe |
-| `detail` | On `down`: the last address that answered. On `up`: the address that answered. On `monitor` rows: the interface and router, or for `unhealthy` the reasons ([health](#the-monitors-own-health)). |
+| `detail` | On `down`: the last address that answered. On `up`: the address that answered. On `monitor` rows: the interface and router, and on `start` (since 0.1.0) the linemon version that started, e.g. `iface=eth0 gateway=192.0.2.1 version=0.1.0-3-gabc1234`; for `unhealthy` the reasons ([health](#the-monitors-own-health)). |
 
 ### `minute.csv`
 
