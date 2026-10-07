@@ -15,16 +15,16 @@ M1 is built and checked on a Pi, apart from tests that need hands on the hardwar
 optional push backup (#52). Revised on 7 Oct 2026 after a week on a real line, where evidence for the
 ISP was still assembled by hand:
 
-1. [#21](https://github.com/johanhellman/linemon/issues/21): the availability definitions on the
-   first real week.
-2. [#10](https://github.com/johanhellman/linemon/issues/10) with
-   [#17](https://github.com/johanhellman/linemon/issues/17): the evidence report, stating the
-   version that produced it.
-3. [#61](https://github.com/johanhellman/linemon/issues/61): router captures that time out while
-   the router is busy, since its status is the strongest evidence.
-4. Notifications ([#44](https://github.com/johanhellman/linemon/issues/44)-[#48](https://github.com/johanhellman/linemon/issues/48)),
-   then a quick prototype for [#12](https://github.com/johanhellman/linemon/issues/12) from the
+1. [#21](https://github.com/johanhellman/linemon/issues/21) and
+   [#10](https://github.com/johanhellman/linemon/issues/10): the availability definitions and the
+   evidence report on the first full week (from 08/10 18:00). The report itself is built.
+2. A quick prototype for [#12](https://github.com/johanhellman/linemon/issues/12) from the
    per-minute data already recorded.
+
+Done since the revision: versions and releases ([#17](https://github.com/johanhellman/linemon/issues/17)),
+the install path ([#18](https://github.com/johanhellman/linemon/issues/18)), router captures during
+outages ([#61](https://github.com/johanhellman/linemon/issues/61)) and the router-script guide
+([#16](https://github.com/johanhellman/linemon/issues/16)). Notifications are parked (below).
 
 ## M1 Unattended operation
 
@@ -87,6 +87,7 @@ Considered and deliberately not on the roadmap for now. Each needs a new reason 
 | Scripts for specific routers we don't have | Untestable without the hardware. The hook kit spike makes them possible for people who own those routers. |
 | A ready-made Raspberry Pi OS image | High maintenance for little gain over a package. Revisit after the packaging spike. |
 | A Debian package ([#18](https://github.com/johanhellman/linemon/issues/18)) | Without an apt repository it is downloaded by hand like the release archive, so it adds no automatic upgrades, only a second installer to keep in step with `install.sh` ([findings](spikes/018-install.md)). Revisit if there is an apt repository worth publishing to, or people ask for one. |
+| Notifications ([#44](https://github.com/johanhellman/linemon/issues/44)-[#48](https://github.com/johanhellman/linemon/issues/48), from spike [#9](https://github.com/johanhellman/linemon/issues/9)) | Decided 07/10/2026: at home an outage is noticed anyway, and away from home it isn't a worry, so a notifier would answer a question nobody is asking. The spike's design ([findings](spikes/009-notify.md)) stays for if that changes. |
 | Capturing the route at the moment of an outage ([#11](https://github.com/johanhellman/linemon/issues/11)) | On the real line the router's own status already says where it broke (the fibre lost its registration), and the first ISP hop being down follows from that. A route sweep would add probes exactly during outages, against principle 5, for little new information. Revisit if outages appear that the hops and the router capture can't place. |
 | Live data from a UniFi gateway ([#14](https://github.com/johanhellman/linemon/issues/14)) | The gateway's own log matched all 31 outages it recorded, and the monitor is now the independent witness; an occasional support export is enough to compare. Revisit if the comparison becomes a regular need. |
 
