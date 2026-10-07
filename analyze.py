@@ -185,29 +185,33 @@ def _offset(seconds):
     return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
 
 
-def router_during(captures, start, end, slack=5, sep='\n'):
-    """What the router reported during an outage (`captures` sorted by time), as a timeline: one
-    line per state, with when it was first and last seen relative to the start of the outage, e.g.
-    '0:05–40:10 fibre O2 standby · signal OK · no IP'. A state is taken to last until the next one
-    was first seen (or the outage ended), so the times are as precise as the captures, about 30 s
-    apart. Failed captures say nothing about the state and are left out, unless all of them failed."""
+def router_states(captures, start, end, slack=5):
+    """What the router reported during an outage (`captures` sorted by time), as a timeline:
+    [(summary, first seen, until)]. A state is taken to last until the next one was first seen (or
+    the outage ended), so the times are as precise as the captures, about 30 s apart. Failed
+    captures say nothing about the state and are left out. Also returns the errors of the failed
+    captures, for when there is no state at all."""
     lo, hi = start - dt.timedelta(seconds=slack), end + dt.timedelta(seconds=slack)
     first = bisect.bisect_left(captures, lo, key=lambda c: c['time'])
     last = bisect.bisect_right(captures, hi, key=lambda c: c['time'])
     found = [c for c in captures[first:last] if c.get('reason') in ('outage-start', 'outage-ongoing')]
-    states = [c for c in found if c.get('summary')]
-    if not states:
-        errors = list(dict.fromkeys(c['error'] for c in found if c.get('error')))
-        return sep.join(f'capture failed: {e}' for e in errors)
     runs = []  # [summary, first seen]
-    for c in states:
-        if not runs or runs[-1][0] != c['summary']:
-            runs.append([c['summary'], c['time']])
-    lines = []
-    for i, (summary, seen) in enumerate(runs):
-        until = runs[i + 1][1] if i + 1 < len(runs) else end
-        lines.append(f'{_offset((seen - start).total_seconds())}–{_offset((until - start).total_seconds())} {summary}')
-    return sep.join(lines)
+    for c in found:
+        if c.get('summary') and (not runs or runs[-1][0] != c['summary']):
+            runs.append([c['summary'], max(c['time'], start)])
+    states = [(summary, seen, runs[i + 1][1] if i + 1 < len(runs) else end) for i, (summary, seen) in enumerate(runs)]
+    errors = list(dict.fromkeys(c['error'] for c in found if c.get('error')))
+    return states, errors
+
+
+def router_during(captures, start, end, slack=5, sep='\n'):
+    """router_states() as text: one line per state with the time since the outage began, e.g.
+    '0:05–40:10 fibre O2 standby · signal OK · no IP', or the failures if no capture succeeded."""
+    states, errors = router_states(captures, start, end, slack)
+    if not states:
+        return sep.join(f'capture failed: {e}' for e in errors)
+    return sep.join(f'{_offset((seen - start).total_seconds())}–{_offset((until - start).total_seconds())} {summary}'
+                    for summary, seen, until in states)
 
 
 MINUTE_FIELDS = ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms']

@@ -2112,6 +2112,14 @@ class Report(unittest.TestCase):
         self.assertNotIn('<script>', page)                                       # router text is escaped
         self.assertIn('&lt;script&gt;', page)
 
+    def test_time_in_each_router_state(self):
+        """Summed over the outages: here one capture 5 s into a 150 s outage, so 145 s in that state and
+        5 s not known."""
+        page = self.render()
+        self.assertIn('What the ISP router reported during these outages', page)
+        self.assertRegex(page, r'no IP &lt;script&gt;x&lt;/script&gt;</td><td class="num nw">2 min 25 s</td><td class="num">96.7 %')
+        self.assertRegex(page, r'not known \(before the first capture.*?</td><td class="num nw">5 s</td><td class="num">3.3 %')
+
     def test_spanish(self):
         page = self.render('es')
         self.assertIn('Informe de cortes', page)

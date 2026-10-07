@@ -25,6 +25,11 @@ short method. The figures come from `analyze.py`, so the report, the page and th
 - **One figure for downtime.** The first draft also summed the outages per layer, which counts
   time the monitor didn't observe and gave a second, larger total (4 h 19 min 55 s). The
   per-layer table now shows counts only, so the report has one downtime figure.
+- **Time in each router state.** Once "Router said" became a timeline, the report also sums,
+  over the outages listed, how long the router reported each state. On the real data from 01/10
+  that showed "fibre O5 operational · signal OK · no IP" for about 2 hours (42.6 %) and the fibre not
+  operational for about 2 h 20 min: the fibre often recovers within a minute while the internet
+  connection doesn't. It uses the router's own words, so it works for any router script.
 - **Spanish** comes from a small word list for the headings, the layers and the router's terms
   (fibre → fibra, no IP → sin IP), as the hand-made reports wrote them, with decimal commas.
 
