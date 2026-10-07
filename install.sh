@@ -44,7 +44,7 @@ echo "Monitor:  $(systemctl is-active linemon)$([ "$restart_monitor" = no ] && e
 echo "Web page: $(systemctl is-active linemon-web) at http://${address:-<pi-address>}:8080"
 echo "NTP synchronised: $(timedatectl show -p NTPSynchronized --value)"
 echo "Router on eth0 right now: $(ip -4 route show default dev eth0 | awk '/default/ {print $3; exit}')"
-echo "Settings: $(sed -n 's/^  config file: //p' <<< "$check")"
+echo "Settings: $(sed -n 's/^  settings: //p' <<< "$check")"
 hook=$(sed -n 's/^  hook: //p' <<< "$check")
 if [ "$hook" != off ]; then
     echo "Router capture: on ($hook)"

@@ -788,6 +788,23 @@ class Config(unittest.TestCase):
         bad = self.run_linemon('--check-config', '--config', self.conf, '--env-file', self.env)
         self.assertEqual(bad.returncode, linemon.EX_CONFIG)
 
+    def test_check_config_says_where_the_settings_come_from(self):
+        """install.sh prints this line; it said 'none (defaults)' when the settings were in LINEMON_ARGS (#69)."""
+        if os.path.exists(linemon.CONFIG_PATH):
+            self.skipTest(f'{linemon.CONFIG_PATH} exists on this machine')
+
+        def settings(*config):
+            r = self.run_linemon('--check-config', *config, '--env-file', self.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return next(line for line in r.stdout.splitlines() if line.startswith('  settings: '))[12:]
+        self.assertEqual(settings(), 'none (defaults)')                       # no file, no environment file
+        self.write('LINEMON_ARGS="--threshold 4"\n', self.env)
+        self.assertEqual(settings(), f'LINEMON_ARGS in {self.env}')           # the Pi on 06/10
+        self.write('[monitor]\nthreshold = 5\n')
+        self.assertEqual(settings('--config', self.conf), f'{self.conf} + LINEMON_ARGS in {self.env}')
+        self.write('# nothing here\n', self.env)
+        self.assertEqual(settings('--config', self.conf), self.conf)
+
     def test_migrate_prints_an_equivalent_file_and_changes_nothing(self):
         self.write('LINEMON_ARGS="--hook /opt/linemon/routers/zte_livebox.py --hook-interval 600 --threshold 3"\n', self.env)
         before = os.listdir(self.tmp)
