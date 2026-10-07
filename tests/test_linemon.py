@@ -1727,6 +1727,70 @@ class HealthOnThePage(unittest.TestCase):
         self.assertNotIn('innerHTML', script)                              # everything shown goes in through textContent
 
 
+class StatusCache(unittest.TestCase):
+    """/api/status is worked out once per data change and 10 s, however many pages are open."""
+
+    def setUp(self):
+        import web
+        self.web = web
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        with open(os.path.join(self.tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n')
+        self.calls, self.t = 0, 1000.0
+        saved = (web.status, web.clock)
+        self.addCleanup(lambda: (setattr(web, 'status', saved[0]), setattr(web, 'clock', saved[1]),
+                                 web._cache.update(key=None, at=None, body=None)))
+        web._cache.update(key=None, at=None, body=None)
+        web.clock = lambda: self.t
+
+        def status(data_dir):
+            self.calls += 1
+            return {'n': self.calls}
+        web.status = status
+
+    def body(self):
+        return json.loads(self.web.status_body(self.tmp))['n']
+
+    def test_shared_until_a_file_changes(self):
+        self.assertEqual([self.body(), self.body()], [1, 1])
+        self.t += 9
+        self.assertEqual(self.body(), 1)
+        with open(os.path.join(self.tmp, 'health.json'), 'w') as f:  # the monitor wrote something
+            f.write('{}')
+        self.assertEqual(self.body(), 2)
+
+    def test_never_kept_longer_than_the_max_age(self):
+        """A monitor that has stopped writes nothing, and the page must still notice in time."""
+        self.assertEqual(self.body(), 1)
+        self.t += self.web.CACHE_MAX_AGE
+        self.assertEqual(self.body(), 2)
+
+    def test_an_error_is_not_kept(self):
+        def broken(data_dir):
+            raise ValueError('boom')
+        working, self.web.status = self.web.status, broken
+        with self.assertRaises(ValueError):
+            self.web.status_body(self.tmp)
+        self.web.status = working
+        self.assertEqual(self.body(), 1)
+
+    def test_requests_at_the_same_time_share_one_answer(self):
+        working = self.web.status
+
+        def slow(data_dir):
+            time.sleep(0.2)
+            return working(data_dir)
+        self.web.status = slow
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(self.body())) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(5)
+        self.assertEqual((results, self.calls), ([1, 1, 1, 1], 1))
+
+
 class PageScript(unittest.TestCase):
     """The page's own JavaScript, run in a fake DOM with Node (skipped where Node isn't installed): the
     banners and the health card for each state of health.json (issue #43)."""
