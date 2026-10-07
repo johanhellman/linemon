@@ -875,13 +875,16 @@ def main():
             args = build_parser({}).parse_args(read_env_args(mode.env_file))
             sys.stdout.write(render_config(args, mode.env_file))
             return
-        args, path, found = parse_settings(argv + (read_env_args(mode.env_file) if mode.check_config else []))
+        env_args = read_env_args(mode.env_file) if mode.check_config else []
+        args, path, found = parse_settings(argv + env_args)
     except ConfigError as e:
         print(f'linemon: configuration error: {e}', file=sys.stderr)
         sys.exit(EX_CONFIG)
     if args.check_config:
         print('configuration OK')
         print(f'  config file: {path if found else "none (defaults)"}')
+        sources = ([path] if found else []) + ([f'LINEMON_ARGS in {mode.env_file}'] if env_args else [])
+        print(f'  settings: {" + ".join(sources) or "none (defaults)"}')
         print(f'  hook: {args.hook or "off"}')
         return
 
