@@ -169,7 +169,7 @@ def render(data_dir, lo, hi, lang='en', now=None):
         for r in rows:
             layer = esc(r['layer']) + (f'<br><small>{esc(t["during"])}: {esc(r["during"])}</small>' if r['during'] else '')
             out.append(f'<tr><td class="nw">{when(r["start"])}</td><td class="nw">{when(r["end"]) if r["end"] else esc(t["ongoing"])}</td>'
-                       f'<td class="num nw">{esc(analyze.fmt_dur(r["duration_s"]))}</td><td>{layer}</td><td>{esc(r["router"])}</td></tr>')
+                       f'<td class="num nw">{esc(analyze.fmt_dur(r["duration_s"]))}</td><td>{layer}</td><td>{esc(r["router"]).replace(chr(10), "<br>")}</td></tr>')
         out.append('</table>')
     else:
         out.append(f'<p>{esc(t["no_outages"])}</p>')
