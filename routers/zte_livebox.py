@@ -56,7 +56,11 @@ GPON_STATES = {
 
 
 class LoginError(Exception):
-    """A rejected login. The message is safe to show; the router's reply is not."""
+    """A rejected login. The message is for the journal; the router's reply is not logged as is."""
+
+    def __init__(self, message, locked=False):
+        super().__init__(message)
+        self.locked = locked
 
 
 def redact(value):
@@ -186,7 +190,7 @@ class Router:
             print(f'login rejected; router replied: {json.dumps(redact(result))[:500]}', file=sys.stderr)
             locked = str(result.get('lockingTime', ''))
             if locked.isdigit() and int(locked) > 0:
-                raise LoginError(f'the router has locked the login for {locked} s')
+                raise LoginError(f'the router has locked the login for {locked} s', locked=True)
             raise LoginError('wrong username or password?')
 
     def logout(self):
@@ -222,17 +226,25 @@ def warn_if_readable_by_others(path):
         print(f'warning: {path} is readable by other users (mode {mode:03o}); run: chmod 600 {path}', file=sys.stderr)
 
 
+def failed(message, detail=None):
+    """A failed capture. `message` is fixed and goes to captures.jsonl and the web page, which
+    has no login; `detail` (exception text, the settings path) goes to stderr, i.e. the journal."""
+    if detail:
+        print(f'{message}: {detail}', file=sys.stderr)
+    return {'error': message}
+
+
 def capture():
     warn_if_readable_by_others(CONFIG)
     cfg = configparser.ConfigParser(interpolation=None)  # passwords may contain '%'
     if not cfg.read(CONFIG) or 'router' not in cfg:
-        return {'error': f'no [router] section in {CONFIG}'}
+        return failed('no router settings', f'no [router] section in {CONFIG}')
     r = cfg['router']
     try:
         failed_at = os.path.getmtime(backoff_file())
         if time.time() - failed_at < LOGIN_BACKOFF_S:
             retry = dt.datetime.fromtimestamp(failed_at + LOGIN_BACKOFF_S).strftime('%H:%M')
-            return {'error': f'login failed recently; not retrying until {retry}. Check the password in {CONFIG}'}
+            return failed(f'login failed recently; not retrying until {retry}', f'check the password in {CONFIG}')
     except FileNotFoundError:
         pass
 
@@ -243,13 +255,13 @@ def capture():
     except LoginError as e:
         with open(backoff_file(), 'w') as f:
             f.write(f'{dt.datetime.now().isoformat()} {e}\n')
-        return {'error': f'login rejected: {e}'}
+        return failed('login rejected; the router has locked the login' if e.locked else 'login rejected', e)
     except Exception as e:
-        return {'error': f'router not reachable: {e}'}
+        return failed('router not reachable', repr(e))
     try:
         led_xml, wan_xml = router.read()
     except Exception as e:
-        return {'error': f'reading status failed: {e}'}
+        return failed('reading status failed', repr(e))
     finally:
         router.logout()
 
@@ -261,7 +273,7 @@ def capture():
     try:
         return summarise(parse_xml(led_xml), parse_xml(wan_xml))
     except Exception as e:
-        return {'error': f'unexpected response: {e}'}
+        return failed('unexpected response', repr(e))
 
 
 if __name__ == '__main__':

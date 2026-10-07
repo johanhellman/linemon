@@ -18,7 +18,6 @@ shows every time its internet session was (re)established.
 """
 import argparse
 import bisect
-import bisect
 import csv
 import datetime as dt
 import io
@@ -57,12 +56,42 @@ _captures_cache = {}  # path -> {'ino', 'offset', 'items'}; guarded by _captures
 _captures_lock = threading.Lock()
 
 
+# The same rule as linemon.py's plain_error and plain_summary, which apply it when a capture is
+# written. It is applied again here so that lines written before that, or by hand, can't put
+# exception text or file paths on the page or in the CSV.
+CAPTURE_FAILED = 'capture failed; see journalctl -u linemon'
+PLAIN_MESSAGE = re.compile(r"[\w ,.;:()'?+-]{1,100}")
+SUMMARY_MAX = 200
+
+
+def plain_error(text):
+    """A capture error as it may be shown: the part before the first ': ' or '. ', if that is a
+    short plain message (e.g. 'router not reachable: <urlopen error ...>' -> 'router not reachable');
+    else None."""
+    if not isinstance(text, str):
+        return None
+    text = re.split(r': |\. ', text, maxsplit=1)[0].strip()
+    return text if PLAIN_MESSAGE.fullmatch(text) else None
+
+
+def plain_summary(text):
+    """A capture summary as it may be shown: one line of text, cut to SUMMARY_MAX; else None."""
+    if not isinstance(text, str):
+        return None
+    text = ' '.join(text.split())
+    return (text if len(text) <= SUMMARY_MAX else text[:SUMMARY_MAX - 1] + '\u2026') or None
+
+
 def _parse_captures(data):
     captures = []
     for line in data.splitlines():
         try:
             c = json.loads(line)
             c['time'] = parse_time(c['time'])
+            if 'error' in c:
+                c['error'] = plain_error(c['error']) or CAPTURE_FAILED
+            if 'summary' in c:
+                c['summary'] = plain_summary(c['summary'])
             captures.append(c)
         except (ValueError, KeyError, TypeError):
             continue  # e.g. a line cut short by a power cut

@@ -100,6 +100,8 @@ class FakeLivebox(BaseHTTPRequestHandler):
     token_counter = 0
     current_token = None
     delay = {}  # _tag (or 'home') -> seconds to wait before answering, like the router while it resyncs
+    locking_time = 0  # seconds the router says it has locked the login for, after a wrong password
+    broken = set()  # _tags whose data the router won't serve (it answers SessionTimeout)
 
     def log_message(self, *args):
         pass
@@ -147,6 +149,8 @@ class FakeLivebox(BaseHTTPRequestHandler):
             FakeLivebox.page = tag
             self.reply(self.page_token(), 'text/html')
         # Like the real router, a page's data is only served while the session is on that page.
+        elif tag in FakeLivebox.broken:
+            self.session_timeout()
         elif tag == 'osp_led_status_orange_lua.lua':
             self.reply(fixture('led_ok.xml')) if FakeLivebox.page == 'vmenu-ledstatus' else self.session_timeout()
         elif tag == 'wan_internetstatus_lua.lua':
@@ -165,7 +169,8 @@ class FakeLivebox(BaseHTTPRequestHandler):
             FakeLivebox.logins.append(ok)
             # Like the real router, the reply carries a session token, also when the login fails.
             self.reply(json.dumps({'sess_token': 'SECRET-SESSION-TOKEN', 'login_need_refresh': ok,
-                                   'loginErrMsg': '' if ok else 'wrong password', 'lockingTime': 0}),
+                                   'loginErrMsg': '' if ok else 'wrong password',
+                                   'lockingTime': 0 if ok else FakeLivebox.locking_time}),
                        'application/json', cookie='SID=good; path=/' if ok else None)
         elif tag == 'logout_entry':
             ok = form.get('_sessionTOKEN') == [FakeLivebox.current_token]
@@ -179,6 +184,7 @@ class LiveboxCapture(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.tmp = tempfile.mkdtemp()
         FakeLivebox.logins, FakeLivebox.logouts, FakeLivebox.delay = [], [], {}
+        FakeLivebox.locking_time, FakeLivebox.broken = 0, set()
 
     def tearDown(self):
         if self.server:
@@ -283,6 +289,56 @@ class LiveboxCapture(unittest.TestCase):
         self.assertIn('not reachable', result['error'])
         self.server = None  # already stopped
 
+    def failed_capture(self, password='correct horse', **settings):
+        """A capture's error and stderr, checking the result holds nothing the page mustn't show (#75)."""
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result, _ = self.capture(password, **settings)
+        self.assertEqual(list(result), ['error'], result)
+        for leak in (self.tmp, 'router.conf', 'Errno', 'urlopen', 'Error', 'SessionTimeout', 'timed out', '<', '/'):
+            self.assertNotIn(leak, result['error'])
+        self.assertNotIn('correct horse', err.getvalue())
+        self.assertNotIn('SECRET', err.getvalue())
+        return result['error'], err.getvalue()
+
+    def test_failed_captures_give_fixed_messages(self):
+        """Each failure gives a short fixed message; the detail goes to stderr, i.e. the journal (#75)."""
+        cases = []
+        FakeLivebox.broken = {'osp_led_status_orange_lua.lua'}
+        cases.append((self.failed_capture(), 'unexpected response', 'SessionTimeout'))
+        FakeLivebox.broken = set()
+        FakeLivebox.delay = {'wan_internetstatus_lua.lua': 1.0}
+        cases.append((self.failed_capture(REQUEST_TIMEOUT_S=0.3, BUDGET_S=5), 'reading status failed', 'timed out'))
+        FakeLivebox.delay = {}
+        cases.append((self.failed_capture('wrong'), 'login rejected', 'wrong username or password'))
+        cases.append((self.failed_capture(), 'login failed recently; not retrying until ', 'router.conf'))
+        os.remove(os.path.join(self.tmp, 'router-login-failed'))
+        FakeLivebox.locking_time = 60
+        cases.append((self.failed_capture('wrong'), 'login rejected; the router has locked the login', 'for 60 s'))
+        os.remove(os.path.join(self.tmp, 'router-login-failed'))
+        self.server.shutdown()
+        self.server.server_close()
+        cases.append((self.failed_capture(), 'router not reachable', 'Connection refused'))
+        self.server = None  # already stopped
+        for (error, journal), message, detail in cases:
+            if message.endswith(' '):
+                self.assertRegex(error, '^' + message + r'\d\d:\d\d$')
+            else:
+                self.assertEqual(error, message)
+            self.assertIn(detail, journal)
+
+    def test_missing_settings_give_a_fixed_message(self):
+        import contextlib
+        import io
+        os.environ.update(LINEMON_ROUTER_CONF=os.path.join(self.tmp, 'missing.conf'), LINEMON_DATA=self.tmp)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = load_router_module().capture()
+        self.assertEqual(result, {'error': 'no router settings'})
+        self.assertIn('missing.conf', err.getvalue())
+
 
 class HookLoop(unittest.TestCase):
     """The monitor runs the hook at outage start, during, at the end and periodically."""
@@ -350,6 +406,108 @@ class SafeErrors(unittest.TestCase):
         self.assertIn('gave no result', stored)
         self.assertNotIn('SECRET', stored)
         self.assertIn('SECRET', journal.getvalue())  # but the owner can still see it in the journal
+
+    def run_hook(self, script):
+        """Run a hook made of `script`; returns the line stored in captures.jsonl and the journal."""
+        import contextlib
+        import io
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        hook = os.path.join(tmp, 'hook.py')
+        with open(hook, 'w') as f:
+            f.write(script)
+        args = types.SimpleNamespace(iface='eth0', data=tmp, interval=1, threshold=3,
+                                     hook=f'{sys.executable} {hook}', hook_during=30, hook_interval=0, hook_timeout=10)
+        original = linemon.default_gateway
+        linemon.default_gateway = lambda iface: '192.168.1.1'
+        try:
+            mon = linemon.Monitor(args)
+        finally:
+            linemon.default_gateway = original
+        self.addCleanup(mon.minute_f.close)
+        self.addCleanup(mon.events_f.close)
+        journal = io.StringIO()
+        with contextlib.redirect_stderr(journal):
+            mon.run_hook('outage-start')
+        with open(os.path.join(tmp, 'captures.jsonl')) as f:
+            return json.loads(f.read()), journal.getvalue()
+
+    def test_hook_output_that_is_not_an_object_is_not_echoed(self):
+        stored, journal = self.run_hook('print(\'["/etc/linemon/router.conf", "SECRET"]\')\n')
+        self.assertIn('something other than a JSON object', stored['error'])
+        self.assertNotIn('SECRET', json.dumps(stored))
+        self.assertNotIn('/etc/linemon', json.dumps(stored))
+        self.assertIn('SECRET', journal)
+
+    def test_a_hook_that_breaks_the_contract_is_cut_back(self):
+        """A third-party hook's error with exception text or a path is not stored as given (#75)."""
+        cases = {
+            'router not reachable: <urlopen error [Errno 101] Network is unreachable>': 'router not reachable',
+            'login failed recently; not retrying until 14:30. Check the password in /etc/x.conf':
+                'login failed recently; not retrying until 14:30',
+            'no [router] section in /etc/linemon/router.conf': linemon.CAPTURE_FAILED,
+            'Traceback (most recent call last):\n  File "/opt/hook.py"': linemon.CAPTURE_FAILED,
+            'x' * 300: linemon.CAPTURE_FAILED,
+            'router not reachable': 'router not reachable',
+        }
+        for given, shown in cases.items():
+            stored, journal = self.run_hook(f'import json\nprint(json.dumps({{"error": {given!r}}}))\n')
+            self.assertEqual(stored['error'], shown, given)
+            if shown != given:
+                self.assertIn(given[:50], journal)  # the owner can still see it
+        stored, _ = self.run_hook('import json\nprint(json.dumps({"error": {"path": "/etc/x"}}))\n')
+        self.assertEqual(stored['error'], linemon.CAPTURE_FAILED)
+        stored, _ = self.run_hook('import json\nprint(json.dumps({"ok": True, "summary": "fibre O5 operational '
+                                  '\\u00b7 internet up", "uptime_s": 5, "time": "2000-01-01T00:00:00+00:00"}))\n')
+        self.assertEqual(stored['summary'], 'fibre O5 operational \u00b7 internet up')  # kept as is
+        self.assertNotEqual(stored['time'], '2000-01-01T00:00:00+00:00')  # linemon's own time wins
+        stored, _ = self.run_hook('import json\nprint(json.dumps({"ok": False, "summary": ["x"]}))\n')
+        self.assertNotIn('summary', stored)
+
+    def test_old_leaky_captures_are_not_shown(self):
+        """Lines written before #75 with exception text or a path stay out of the page and the CSV."""
+        import web
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        t0 = dt.datetime.now().astimezone().replace(microsecond=0) - dt.timedelta(minutes=10)
+        with open(os.path.join(tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n')
+            f.write(f'{t0.isoformat()},monitor,start,,\n')
+            for secs, event in ((60, 'down'), (120, 'up')):
+                for h in analyze.INTERNET_HOSTS:
+                    f.write(f'{(t0 + dt.timedelta(seconds=secs)).isoformat()},{h},{event},,\n')
+        with open(os.path.join(tmp, 'minute.csv'), 'w') as f:
+            f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n')
+            for m in range(11):
+                f.write(f'{(t0 + dt.timedelta(minutes=m)).isoformat()},1.1.1.1,60,0,1.0,2.0\n')
+        leaky = [
+            (63, 'outage-start', 'router not reachable: <urlopen error [Errno 101] Network is unreachable>'),
+            (93, 'outage-ongoing', 'reading status failed: timed out'),
+            (100, 'outage-ongoing', 'no [router] section in /etc/linemon/router.conf'),
+            (110, 'outage-ongoing', 'login failed recently; not retrying until 14:30. Check the password in '
+                                    '/etc/linemon/router.conf'),
+            (300, 'periodic', 'expected a JSON object, got: ["/etc/linemon/router.conf"]'),
+        ]
+        with open(os.path.join(tmp, 'captures.jsonl'), 'w') as f:
+            for secs, reason, error in leaky:
+                f.write(json.dumps({'time': (t0 + dt.timedelta(seconds=secs)).isoformat(), 'reason': reason,
+                                    'error': error}) + '\n')
+        status = web.status(tmp)
+        shown = json.dumps(status)
+        for leak in ('urlopen', 'Errno', 'timed out', '/etc/linemon', 'router.conf'):
+            self.assertNotIn(leak, shown)
+        self.assertEqual(status['router_status']['error'], 'expected a JSON object, got')
+        captures = analyze.load_captures(tmp)
+        csv_text = analyze.router_during(captures, t0 + dt.timedelta(seconds=60), t0 + dt.timedelta(seconds=120))
+        self.assertEqual(csv_text, 'capture failed: router not reachable; capture failed: reading status failed; '
+                                   f'capture failed: {analyze.CAPTURE_FAILED}; '
+                                   'capture failed: login failed recently; not retrying until 14:30')
+
+    def test_page_and_monitor_use_the_same_rule(self):
+        for text in ('router not reachable: x', 'a/b', 'login rejected; the router has locked the login',
+                     'fibre O5 operational \u00b7 signal OK', 'x' * 101, 'x' * 300, '', None, 5, ' two\n lines '):
+            self.assertEqual(linemon.plain_error(text), analyze.plain_error(text), text)
+            self.assertEqual(linemon.plain_summary(text), analyze.plain_summary(text), text)
 
     def api(self, data_dir):
         import io

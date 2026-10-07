@@ -328,14 +328,24 @@ It must print one JSON object on its last line of output. linemon understands:
 | Key | Meaning |
 |---|---|
 | `ok` | `true` if the router reports everything healthy |
-| `summary` | One line for people, shown as "Router said" |
+| `summary` | One line of text for people, shown as "Router said" |
 | `uptime_s` | Seconds since the router's internet connection was established, if it has one |
-| `error` | Set instead of the above when the capture failed. Shown on the web page, which has no login: use a short fixed message, never the router's reply or exception text. |
+| `error` | Set instead of the above when the capture failed. Shown on the web page, which has no login: use a short fixed message such as `router not reachable`, never the router's reply, exception text or a file path. |
 
 Write details for troubleshooting to stderr: linemon passes them to the systemd journal
 (`journalctl -u linemon`), never to `captures.jsonl`. Anything else (e.g. `details`) is
 stored as is. linemon adds `time`, `reason` and,
-if raw files were saved, `files`, and appends the line to `captures.jsonl`.
+if raw files were saved, `files` (a hook can't set these), and appends the line to
+`captures.jsonl`.
+
+Because the page has no login, linemon doesn't rely on a hook following this. Before storing a
+result it cuts `error` at the first `: ` or `. ` (what follows is usually exception text or a
+path), and keeps what is left only if it is at most 100 characters of letters, digits, spaces
+and `, . ; : ( ) ' ? + -`; anything else becomes `capture failed; see journalctl -u linemon`.
+`summary` must be text: it is made one line and cut to 200 characters, and anything that isn't
+text is left out. The original goes to the journal. The web page and the analyzer apply the
+same rule when they read `captures.jsonl`, so lines written by older versions are shown the
+same way (e.g. `router not reachable: <urlopen error ...>` as `router not reachable`).
 
 ### Session starts
 
@@ -372,6 +382,19 @@ From the responses it reports:
 `ok` is true only when the fibre is operational, there is no loss of signal and the
 router has an address. The raw XML responses are saved for outage captures, not for
 periodic ones. After a rejected login it does not try again for 30 minutes.
+
+A failed capture reports one of these fixed errors, with the details (the exception, the
+settings file's path) only in the journal:
+
+| Error | Meaning |
+|---|---|
+| `no router settings` | The settings file is missing or has no `[router]` section |
+| `login rejected` | The router refused the username or password |
+| `login rejected; the router has locked the login` | The router has locked logins after failed attempts |
+| `login failed recently; not retrying until HH:MM` | A login failed less than 30 minutes ago |
+| `router not reachable` | Logging in failed: no answer, a timeout or an unexpected reply |
+| `reading status failed` | Logged in, but reading the status pages failed |
+| `unexpected response` | The status pages could not be understood |
 
 While the router re-registers on the fibre, its web pages can be slow, which is exactly when a
 capture matters. Each request may take up to 20 seconds, and the whole capture gives up after
