@@ -49,12 +49,13 @@ Tell the user when the line fails, and produce evidence they can send to the ISP
 
 ## M3 Deeper measurement
 
-Locate faults more precisely and measure line quality, including backup links.
+Locate faults more precisely and measure line quality, including backup links and a second vantage point behind the home router.
 
 | Spike | Time-box | Depends on |
 |---|---|---|
 | [#12](https://github.com/johanhellman/linemon/issues/12) Show line quality, not only outages | 1 day | [#5](https://github.com/johanhellman/linemon/issues/5) |
 | [#13](https://github.com/johanhellman/linemon/issues/13) Monitor a backup link alongside the main line | 1 day | [#4](https://github.com/johanhellman/linemon/issues/4), [#5](https://github.com/johanhellman/linemon/issues/5) |
+| [#82](https://github.com/johanhellman/linemon/issues/82) A second vantage point behind the home router | 2 days + 3 days running | [#13](https://github.com/johanhellman/linemon/issues/13) (soft) |
 
 ## M4 Integrations
 
