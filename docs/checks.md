@@ -338,14 +338,14 @@ stored as is. linemon adds `time`, `reason` and,
 if raw files were saved, `files` (a hook can't set these), and appends the line to
 `captures.jsonl`.
 
-Because the page has no login, linemon doesn't rely on a hook following this. Before storing a
-result it cuts `error` at the first `: ` or `. ` (what follows is usually exception text or a
-path), and keeps what is left only if it is at most 100 characters of letters, digits, spaces
-and `, . ; : ( ) ' ? + -`; anything else becomes `capture failed; see journalctl -u linemon`.
-`summary` must be text: it is made one line and cut to 200 characters, and anything that isn't
-text is left out. The original goes to the journal. The web page and the analyzer apply the
-same rule when they read `captures.jsonl`, so lines written by older versions are shown the
-same way (e.g. `router not reachable: <urlopen error ...>` as `router not reachable`).
+Because the page has no login, linemon doesn't rely on a hook following this. Wherever a capture
+is shown (the web page and the analyzer, including its CSV), `error` is cut at the first `: ` or
+`. ` (what follows is usually exception text or a path) and what is left is kept only if it is at
+most 100 characters of letters, digits, spaces and `, . ; : ( ) ' ? + -`; anything else is shown
+as `capture failed; see journalctl -u linemon`. `summary` must be text: it is shown as one line of
+at most 200 characters, and anything that isn't text is left out. `captures.jsonl` keeps what the
+hook gave, for the owner of the Pi. Lines written by older versions are shown the same way (e.g.
+`router not reachable: <urlopen error ...>` as `router not reachable`).
 
 ### Session starts
 

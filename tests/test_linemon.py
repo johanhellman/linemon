@@ -439,30 +439,30 @@ class SafeErrors(unittest.TestCase):
         self.assertNotIn('/etc/linemon', json.dumps(stored))
         self.assertIn('SECRET', journal)
 
-    def test_a_hook_that_breaks_the_contract_is_cut_back(self):
-        """A third-party hook's error with exception text or a path is not stored as given (#75)."""
+    def test_a_hook_that_breaks_the_contract_is_cut_back_where_it_is_shown(self):
+        """A third-party hook's error with exception text or a path is not shown as given (#75). It stays in
+        captures.jsonl for the owner, but the page and the CSV read it through analyze.load_captures."""
         cases = {
             'router not reachable: <urlopen error [Errno 101] Network is unreachable>': 'router not reachable',
             'login failed recently; not retrying until 14:30. Check the password in /etc/x.conf':
                 'login failed recently; not retrying until 14:30',
-            'no [router] section in /etc/linemon/router.conf': linemon.CAPTURE_FAILED,
-            'Traceback (most recent call last):\n  File "/opt/hook.py"': linemon.CAPTURE_FAILED,
-            'x' * 300: linemon.CAPTURE_FAILED,
+            'no [router] section in /etc/linemon/router.conf': analyze.CAPTURE_FAILED,
+            'Traceback (most recent call last):\n  File "/opt/hook.py"': analyze.CAPTURE_FAILED,
+            'x' * 300: analyze.CAPTURE_FAILED,
             'router not reachable': 'router not reachable',
         }
         for given, shown in cases.items():
-            stored, journal = self.run_hook(f'import json\nprint(json.dumps({{"error": {given!r}}}))\n')
-            self.assertEqual(stored['error'], shown, given)
-            if shown != given:
-                self.assertIn(given[:50], journal)  # the owner can still see it
+            stored, _ = self.run_hook(f'import json\nprint(json.dumps({{"error": {given!r}}}))\n')
+            self.assertEqual(analyze._parse_captures(json.dumps(stored))[0]['error'], shown, given)
         stored, _ = self.run_hook('import json\nprint(json.dumps({"error": {"path": "/etc/x"}}))\n')
-        self.assertEqual(stored['error'], linemon.CAPTURE_FAILED)
+        self.assertEqual(analyze._parse_captures(json.dumps(stored))[0]['error'], analyze.CAPTURE_FAILED)
         stored, _ = self.run_hook('import json\nprint(json.dumps({"ok": True, "summary": "fibre O5 operational '
                                   '\\u00b7 internet up", "uptime_s": 5, "time": "2000-01-01T00:00:00+00:00"}))\n')
-        self.assertEqual(stored['summary'], 'fibre O5 operational \u00b7 internet up')  # kept as is
         self.assertNotEqual(stored['time'], '2000-01-01T00:00:00+00:00')  # linemon's own time wins
+        shown = analyze._parse_captures(json.dumps(stored))[0]
+        self.assertEqual(shown['summary'], 'fibre O5 operational \u00b7 internet up')  # kept as is
         stored, _ = self.run_hook('import json\nprint(json.dumps({"ok": False, "summary": ["x"]}))\n')
-        self.assertNotIn('summary', stored)
+        self.assertIsNone(analyze._parse_captures(json.dumps(stored))[0].get('summary'))
 
     def test_old_leaky_captures_are_not_shown(self):
         """Lines written before #75 with exception text or a path stay out of the page and the CSV."""
@@ -502,12 +502,6 @@ class SafeErrors(unittest.TestCase):
         self.assertEqual(csv_text, 'capture failed: router not reachable; capture failed: reading status failed; '
                                    f'capture failed: {analyze.CAPTURE_FAILED}; '
                                    'capture failed: login failed recently; not retrying until 14:30')
-
-    def test_page_and_monitor_use_the_same_rule(self):
-        for text in ('router not reachable: x', 'a/b', 'login rejected; the router has locked the login',
-                     'fibre O5 operational \u00b7 signal OK', 'x' * 101, 'x' * 300, '', None, 5, ' two\n lines '):
-            self.assertEqual(linemon.plain_error(text), analyze.plain_error(text), text)
-            self.assertEqual(linemon.plain_summary(text), analyze.plain_summary(text), text)
 
     def api(self, data_dir):
         import io

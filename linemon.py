@@ -157,51 +157,6 @@ def dns_probe(server, iface, timeout=1.0):
     return False, None, None
 
 
-# A hook's `error` and `summary` are shown on the web page, which has no login. The hook contract
-# asks for short fixed messages, but a hook may not follow it, so linemon keeps only what looks
-# like one (analyze.py applies the same rule to captures already on disk).
-CAPTURE_FAILED = 'capture failed; see journalctl -u linemon'
-PLAIN_MESSAGE = re.compile(r"[\w ,.;:()'?+-]{1,100}")
-SUMMARY_MAX = 200
-
-
-def plain_error(text):
-    """A capture error as the page may show it: the part before the first ': ' or '. ' (what
-    follows is usually exception text or a path), if that is a short plain message; else None."""
-    if not isinstance(text, str):
-        return None
-    text = re.split(r': |\. ', text, maxsplit=1)[0].strip()
-    return text if PLAIN_MESSAGE.fullmatch(text) else None
-
-
-def plain_summary(text):
-    """A capture summary as the page may show it: one line of text, cut to SUMMARY_MAX; else None."""
-    if not isinstance(text, str):
-        return None
-    text = ' '.join(text.split())
-    return (text if len(text) <= SUMMARY_MAX else text[:SUMMARY_MAX - 1] + '\u2026') or None
-
-
-def safe_hook_result(result, reason):
-    """The hook's result with `error` and `summary` made safe to show; anything changed is logged."""
-    result = dict(result)
-    for key in ('time', 'reason', 'files'):  # linemon's own fields: a hook can't set them
-        if key in result:
-            print(f'hook {reason}: ignored its {key!r} field', file=sys.stderr, flush=True)
-            del result[key]
-    for key, clean, fallback in (('error', plain_error, CAPTURE_FAILED), ('summary', plain_summary, None)):
-        if key not in result:
-            continue
-        value = clean(result[key]) or fallback
-        if value != result[key]:
-            print(f'hook {reason}: {key} not shown as given: {str(result[key])[:500]}', file=sys.stderr, flush=True)
-            if value is None:
-                del result[key]
-            else:
-                result[key] = value
-    return result
-
-
 def ends_with_newline(path):
     with open(path, 'rb') as f:
         f.seek(0, os.SEEK_END)
@@ -410,7 +365,8 @@ class Monitor:
             if not isinstance(result, dict):
                 print(f'hook {reason}: output is not a JSON object: {out[:500]}', file=sys.stderr, flush=True)
                 result = {'error': 'capture script gave something other than a JSON object; see journalctl -u linemon'}
-            result = safe_hook_result(result, reason)
+            # time, reason and files are linemon's own: a hook can't change when a capture was taken
+            result = {k: v for k, v in result.items() if k not in ('time', 'reason', 'files')}
         except subprocess.TimeoutExpired:
             result = {'error': f'timed out after {self.args.hook_timeout} s'}
         except json.JSONDecodeError:
