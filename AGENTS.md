@@ -82,7 +82,7 @@ default, and their absence is handled gracefully.
 | `linemon.py` | The monitor (systemd service `linemon`, runs as root) |
 | `analyze.py` | Outage analysis, CSV export, matching against a UniFi gateway's WAN log |
 | `web.py` | Read-only status page on port 8080 (service `linemon-web`, unprivileged); reuses `analyze.py` |
-| `routers/` | Capture hooks for specific ISP routers, e.g. `zte_livebox.py` |
+| `routers/` | Capture hooks for specific ISP routers, e.g. `zte_livebox.py`; `template.py` to start a new one ([guide](docs/router-hooks.md)) |
 | `trim.py` | Deletes data from before a given time, with a backup first; only while the monitor is stopped |
 | `tools/browse.py` | Generates ordinary browsing traffic for a test agreed with the ISP; not part of the monitor |
 | `tools/pull.py` | Run on the user's computer: copies the data off the Pi with rsync over SSH, keeping files a trim made smaller |

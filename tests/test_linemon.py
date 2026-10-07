@@ -340,6 +340,64 @@ class LiveboxCapture(unittest.TestCase):
         self.assertIn('missing.conf', err.getvalue())
 
 
+class RouterTemplate(unittest.TestCase):
+    """routers/template.py has all but the router-specific part (spike #16): the Livebox script
+    redone from it works, backs off after a rejected login, and an unfinished copy fails safely."""
+
+    setUp, tearDown = LiveboxCapture.setUp, LiveboxCapture.tearDown  # the same fake Livebox
+
+    def run_template(self, password, read_status=None):
+        import contextlib
+        import io
+        conf = os.path.join(self.tmp, 'router.conf')
+        with open(conf, 'w') as f:
+            f.write(f'[router]\nhost = 127.0.0.1:{self.server.server_port}\nusername = admin\npassword = {password}\n')
+        spec = importlib.util.spec_from_file_location('template', os.path.join(ROOT, 'routers', 'template.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.CONFIG, module.DATA_DIR = conf, self.tmp
+        if read_status:
+            module.read_status = lambda host, user, pw: read_status(module, host, user, pw)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = module.capture()
+        return result, err.getvalue()
+
+    @staticmethod
+    def livebox(module, host, username, password):
+        """read_status() as someone would write it from the guide, using the Livebox's protocol."""
+        zte = load_router_module()
+        router = zte.Router(host, username, password)
+        try:
+            router.login()
+        except zte.LoginError as e:
+            raise module.LoginError(str(e))
+        try:
+            led, wan = router.read()
+        finally:
+            router.logout()
+        return zte.summarise(zte.parse_xml(led), zte.parse_xml(wan))
+
+    def test_the_livebox_redone_from_the_template(self):
+        result, _ = self.run_template('correct horse', self.livebox)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['uptime_s'], 1060)
+        self.assertEqual(FakeLivebox.logouts, [True])
+
+    def test_a_rejected_login_backs_off(self):
+        result, journal = self.run_template('s3cret-not-it', self.livebox)
+        self.assertEqual(result, {'error': 'login rejected'})
+        result, _ = self.run_template('s3cret-not-it', self.livebox)
+        self.assertIn('not retrying until', result['error'])
+        self.assertEqual(FakeLivebox.logins, [False])                       # one attempt, no second
+        self.assertNotIn('s3cret-not-it', journal)                           # the password never reaches the journal
+
+    def test_an_unfinished_copy_fails_safely(self):
+        result, journal = self.run_template('correct horse')
+        self.assertEqual(result, {'error': 'capture script not finished'})
+        self.assertIn('read_status() has not been written', journal)
+
+
 class HookLoop(unittest.TestCase):
     """The monitor runs the hook at outage start, during, at the end and periodically."""
 

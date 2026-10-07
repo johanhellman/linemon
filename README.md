@@ -180,8 +180,9 @@ trying again, so a wrong password can't get the router's admin account locked. T
 script logs in and out for every capture; if the router allows only one admin session,
 you may occasionally be logged out of its web page while a capture runs.
 
-To support another router, write a script that prints one JSON object such as
-`{"ok": false, "summary": "...", "uptime_s": 120}`; the details are in
+To support another router, start from `routers/template.py` and follow
+[docs/router-hooks.md](docs/router-hooks.md): it walks through finding the router's status
+pages, writing the script, and testing it against a fake router. The contract is in
 [docs/checks.md](docs/checks.md#router-captures).
 
 ## Supervised line tests
