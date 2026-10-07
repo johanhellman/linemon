@@ -1051,7 +1051,7 @@ class InstallFiles(unittest.TestCase):
             self.assertLess(check, script.index(first_change), first_change)
 
     def test_every_file_install_copies_exists(self):
-        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', 'linemon.service', 'linemon-web.service',
+        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', 'report.py', 'linemon.service', 'linemon-web.service',
                      'linemon.conf.example'):
             self.assertTrue(os.path.exists(os.path.join(ROOT, name)), name)
             self.assertIn(name, self.read('install.sh'))
@@ -1759,7 +1759,7 @@ class StaticChecks(unittest.TestCase):
         defined nowhere in the file, such as a missing import."""
         import ast
         import builtins
-        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', os.path.join('routers', 'zte_livebox.py'),
+        for name in ('linemon.py', 'analyze.py', 'web.py', 'trim.py', 'report.py', os.path.join('routers', 'zte_livebox.py'),
                      os.path.join('tools', 'pull.py'), os.path.join('tools', 'browse.py')):
             with open(os.path.join(ROOT, name)) as f:
                 tree = ast.parse(f.read())
@@ -1979,6 +1979,60 @@ class Versions(unittest.TestCase):
         self.assertIn('safe.directory', script)          # git as root in a user's clone
         self.assertIn('> /opt/linemon/VERSION', script)
         self.assertLess(script.index('install -m 755 linemon.py'), script.index('> /opt/linemon/VERSION'))
+
+
+class Report(unittest.TestCase):
+    """The evidence report for a period (spike #10): the analyzer's figures, in English or Spanish."""
+
+    TZ = dt.timezone(dt.timedelta(hours=2))
+
+    def at(self, minute, second=0):
+        return dt.datetime(2026, 10, 5, 20, minute, second, tzinfo=self.TZ)
+
+    def setUp(self):
+        import report
+        self.report = report
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        with open(os.path.join(self.tmp, 'events.csv'), 'w') as f:
+            f.write('time,target,event,duration_s,detail\n')
+            f.write(f'{self.at(0).isoformat()},monitor,start,,\n')
+            for t, kind in ((self.at(10), 'down'), (self.at(12, 30), 'up')):
+                for h in analyze.INTERNET_HOSTS + ['isp_hop1']:
+                    f.write(f'{t.isoformat()},{h},{kind},,\n')
+        with open(os.path.join(self.tmp, 'minute.csv'), 'w') as f:
+            f.write('minute,target,sent,lost,rtt_avg_ms,rtt_max_ms\n')
+            f.writelines(f'{self.at(m).isoformat()},link,60,0,,\n' for m in range(60))
+        with open(os.path.join(self.tmp, 'captures.jsonl'), 'w') as f:
+            f.write(json.dumps({'time': self.at(10, 5).isoformat(), 'reason': 'outage-start', 'ok': False,
+                                'summary': 'fibre O2 standby · signal OK · no IP <script>x</script>'}) + '\n')
+
+    def render(self, lang='en', lo=0, hi=60):
+        return self.report.render(self.tmp, self.at(lo), self.at(hi - 1, 59) + dt.timedelta(seconds=1), lang,
+                                  now=self.at(59) + dt.timedelta(hours=1))
+
+    def test_the_figures_are_the_analyzers(self):
+        page = self.render()
+        a = analyze.availability(self.tmp, self.at(0), self.at(59) + dt.timedelta(minutes=1), self.at(59) + dt.timedelta(hours=1))
+        self.assertIn(f'{100 * a["availability"]:.4f} %', page)
+        self.assertIn('<td>1</td>', page)                                        # one outage
+        self.assertIn('2 min 30 s', page)
+        self.assertIn('first ISP hop unreachable (access network)', page)
+        self.assertIn(f'linemon {analyze.version()}', page)
+        self.assertNotIn('<script>', page)                                       # router text is escaped
+        self.assertIn('&lt;script&gt;', page)
+
+    def test_spanish(self):
+        page = self.render('es')
+        self.assertIn('Informe de cortes', page)
+        self.assertIn('fibra O2 standby · señal OK · sin IP', page)
+        self.assertIn('primer router del operador inaccesible', page)
+        self.assertRegex(page, r'\d+,\d{4} %')                                  # a decimal comma
+
+    def test_a_period_without_outages(self):
+        page = self.render(lo=30, hi=60)
+        self.assertIn('No internet outages in this period.', page)
+        self.assertIn('100.0000 %', page)
 
 
 class StatusCache(unittest.TestCase):

@@ -29,7 +29,7 @@ fi
 install -d /opt/linemon /opt/linemon/routers /var/lib/linemon
 [ -d /etc/linemon ] || install -d -m 700 /etc/linemon
 install -m 644 linemon.conf.example /etc/linemon/linemon.conf.example
-install -m 755 linemon.py analyze.py web.py trim.py /opt/linemon/
+install -m 755 linemon.py analyze.py web.py trim.py report.py /opt/linemon/
 # The exact version installed, read by the scripts and stated in evidence: a release (0.1.0) or, from a
 # git checkout between releases, what git describes (0.1.0-3-gabc1234). Run as root in a user's clone,
 # git needs to be told the directory is safe.

@@ -243,6 +243,18 @@ they hold up when you show them to your ISP. Choose another period with
 `--from 2026-09-01 --to 2026-10-01`. The definitions are in
 [docs/checks.md](docs/checks.md#availability-mtbf-and-mttr).
 
+### A report to send to your ISP
+
+```bash
+python3 /opt/linemon/report.py --from 2026-10-01T18:00 --to 2026-10-08T18:00 --lang es -o report.html
+```
+
+writes one HTML page for the period: how much of it the monitor observed, availability, every
+internet outage with where the path broke and what the router reported, how it was measured,
+and the linemon version. `--lang` is `en` or `es`. Open it in a browser and print it to PDF if a
+PDF is wanted. The figures are the analyzer's. It holds no personal details or addresses; add
+your customer or ticket number in the message it goes with.
+
 ### Comparing with a UniFi gateway
 
 If your own router is a UniFi gateway (e.g. a UDM Pro), the analyzer can match the
