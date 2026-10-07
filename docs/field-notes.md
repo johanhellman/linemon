@@ -83,6 +83,11 @@ unknown time.
   with optical signal present and no IP; a short period of complete loss of signal (LOS)
   was captured the same way. That is what moved the discussion with the ISP from "your
   equipment" to the operator's side.
+- **In the long outages the fibre comes back, the internet doesn't.** Shown once the "Router
+  said" column became a timeline (7 Oct): the 45-minute outage on 5 Oct was about 35 s of O2
+  standby, then 45 minutes of "O5 operational · signal OK · no IP"; the 22- and 16-minute ones
+  look the same. The fibre re-registers within half a minute, but the router gets no internet
+  address, which points at the operator's IP or session layer rather than the fibre.
 - **Router captures can time out while the router answers pings.** The router's web
   interface seems slow while it re-registers, which is when a capture matters most:
   [#61](https://github.com/johanhellman/linemon/issues/61).

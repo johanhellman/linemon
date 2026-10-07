@@ -556,7 +556,7 @@ class SafeErrors(unittest.TestCase):
             self.assertNotIn(leak, shown)
         self.assertEqual(status['router_status']['error'], 'expected a JSON object, got')
         captures = analyze.load_captures(tmp)
-        csv_text = analyze.router_during(captures, t0 + dt.timedelta(seconds=60), t0 + dt.timedelta(seconds=120))
+        csv_text = analyze.router_during(captures, t0 + dt.timedelta(seconds=60), t0 + dt.timedelta(seconds=120), sep='; ')
         self.assertEqual(csv_text, 'capture failed: router not reachable; capture failed: reading status failed; '
                                    f'capture failed: {analyze.CAPTURE_FAILED}; '
                                    'capture failed: login failed recently; not retrying until 14:30')
@@ -608,7 +608,25 @@ class Analysis(unittest.TestCase):
                 {'time': t0 + dt.timedelta(seconds=93), 'reason': 'outage-ongoing', 'summary': 'no IP'},
                 {'time': t0 + dt.timedelta(seconds=100), 'reason': 'outage-ongoing', 'error': 'timed out'}]
         text = analyze.router_during(caps, t0 + dt.timedelta(seconds=60), t0 + dt.timedelta(seconds=120))
-        self.assertEqual(text, 'no IP; capture failed: timed out')
+        self.assertEqual(text, '0:03–1:00 no IP')                     # a failed capture says nothing about the state
+
+    def test_router_during_a_long_outage_is_a_timeline(self):
+        """Like 05/10 00:47, 45 min 33 s: which state the router was in, in order, and for how long."""
+        t0 = dt.datetime(2026, 10, 5, 0, 47, 43, tzinfo=dt.timezone.utc)
+        o2, o4, o5 = 'fibre O2 standby · no IP', 'fibre O4 ranging · no IP', 'fibre O5 operational · no IP'
+        caps = [{'time': t0 + dt.timedelta(seconds=5), 'reason': 'outage-start', 'summary': o2}]
+        caps += [{'time': t0 + dt.timedelta(seconds=5 + 38 * i), 'reason': 'outage-ongoing', 'summary': o2} for i in range(1, 60)]
+        caps += [{'time': t0 + dt.timedelta(seconds=1300), 'reason': 'outage-ongoing', 'error': 'router not reachable'},
+                 {'time': t0 + dt.timedelta(seconds=2410), 'reason': 'outage-ongoing', 'summary': o4},
+                 {'time': t0 + dt.timedelta(seconds=2448), 'reason': 'outage-ongoing', 'summary': o4},
+                 {'time': t0 + dt.timedelta(seconds=2690), 'reason': 'outage-ongoing', 'summary': o5}]
+        caps.sort(key=lambda c: c['time'])
+        end = t0 + dt.timedelta(seconds=2733)
+        self.assertEqual(analyze.router_during(caps, t0, end).split('\n'),
+                         [f'0:05–40:10 {o2}', f'40:10–44:50 {o4}', f'44:50–45:33 {o5}'])
+        self.assertEqual(analyze.router_during(caps, t0, end, sep='; ').count('; '), 2)   # one line in the CSV
+        only_failed = [{'time': t0 + dt.timedelta(seconds=5), 'reason': 'outage-start', 'error': 'router not reachable'}]
+        self.assertEqual(analyze.router_during(only_failed, t0, end), 'capture failed: router not reachable')
 
 
 class OngoingOutages(unittest.TestCase):
@@ -959,7 +977,9 @@ class CapturesCache(unittest.TestCase):
         base = dt.datetime(2026, 10, 1, 12, 0, tzinfo=self.TZ)
         for start_min, length_min in ((0, 1), (6, 2), (13, 30), (50, 0), (170, 20), (400, 5)):
             s, e = base + dt.timedelta(minutes=start_min), base + dt.timedelta(minutes=start_min + length_min)
-            self.assertEqual(analyze.router_during(captures, s, e), linear(s, e), (start_min, length_min))
+            timeline = analyze.router_during(captures, s, e, sep='; ')
+            states = '; '.join(line.split(' ', 1)[1] for line in timeline.split('; ')) if timeline else ''
+            self.assertEqual(states, linear(s, e), (start_min, length_min))
         since = base + dt.timedelta(minutes=100)
         self.assertEqual([c['summary'] for c in analyze.captures_since(captures, since)],
                          [c['summary'] for c in captures if c['time'] >= since])

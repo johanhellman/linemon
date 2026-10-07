@@ -328,7 +328,7 @@ It must print one JSON object on its last line of output. linemon understands:
 | Key | Meaning |
 |---|---|
 | `ok` | `true` if the router reports everything healthy |
-| `summary` | One line of text for people, shown as "Router said" |
+| `summary` | One line of text for people, shown as "Router said". For each outage the page, the CSV and the report show the summaries as a timeline: one line per state, in order, with the time since the outage began when it was first seen and until the next state was seen, e.g. `0:35–45:33 fibre O5 operational · signal OK · no IP`. The times are as precise as the captures (about 30 s apart); failed captures are left out unless all of them failed. |
 | `uptime_s` | Seconds since the router's internet connection was established, if it has one |
 | `error` | Set instead of the above when the capture failed. Shown on the web page, which has no login: use a short fixed message such as `router not reachable`, never the router's reply, exception text or a file path. |
 

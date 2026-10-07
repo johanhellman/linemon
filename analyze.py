@@ -178,18 +178,36 @@ def session_starts(captures, tolerance=30):
     return sessions
 
 
-def router_during(captures, start, end, slack=5):
-    """What the router reported in captures taken during an outage (`captures` sorted by time)."""
+def _offset(seconds):
+    """Time since an outage began: '0:05', '12:20', '1:02:03'."""
+    m, s = divmod(max(0, int(round(seconds))), 60)
+    h, m = divmod(m, 60)
+    return f'{h}:{m:02d}:{s:02d}' if h else f'{m}:{s:02d}'
+
+
+def router_during(captures, start, end, slack=5, sep='\n'):
+    """What the router reported during an outage (`captures` sorted by time), as a timeline: one
+    line per state, with when it was first and last seen relative to the start of the outage, e.g.
+    '0:05–40:10 fibre O2 standby · signal OK · no IP'. A state is taken to last until the next one
+    was first seen (or the outage ended), so the times are as precise as the captures, about 30 s
+    apart. Failed captures say nothing about the state and are left out, unless all of them failed."""
     lo, hi = start - dt.timedelta(seconds=slack), end + dt.timedelta(seconds=slack)
     first = bisect.bisect_left(captures, lo, key=lambda c: c['time'])
     last = bisect.bisect_right(captures, hi, key=lambda c: c['time'])
     found = [c for c in captures[first:last] if c.get('reason') in ('outage-start', 'outage-ongoing')]
-    summaries = []
-    for c in found:
-        s = c.get('summary') or ('capture failed: ' + c['error'] if c.get('error') else '')
-        if s and s not in summaries:
-            summaries.append(s)
-    return '; '.join(summaries)
+    states = [c for c in found if c.get('summary')]
+    if not states:
+        errors = list(dict.fromkeys(c['error'] for c in found if c.get('error')))
+        return sep.join(f'capture failed: {e}' for e in errors)
+    runs = []  # [summary, first seen]
+    for c in states:
+        if not runs or runs[-1][0] != c['summary']:
+            runs.append([c['summary'], c['time']])
+    lines = []
+    for i, (summary, seen) in enumerate(runs):
+        until = runs[i + 1][1] if i + 1 < len(runs) else end
+        lines.append(f'{_offset((seen - start).total_seconds())}–{_offset((until - start).total_seconds())} {summary}')
+    return sep.join(lines)
 
 
 MINUTE_FIELDS = ['minute', 'target', 'sent', 'lost', 'rtt_avg_ms', 'rtt_max_ms']
@@ -765,7 +783,7 @@ def main():
                      'end': '' if ongoing else e.isoformat(timespec='seconds'),
                      'duration_s': round(secs), 'ongoing': 'yes' if ongoing else '',
                      'layer': layer, 'during': describe_during(during(s, e, outages)),
-                     'router': router_during(captures, s, e), 'udm_match': ''})
+                     'router': router_during(captures, s, e, sep='; '), 'udm_match': ''})
     if internet:
         print('\n  Where the path broke:')
         for layer, (n, secs) in sorted(by_layer.items(), key=lambda x: -x[1][0]):

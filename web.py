@@ -283,7 +283,7 @@ h1 { font-size:20px; margin:4px 0 2px } h2 { font-size:15px; margin:0 0 10px }
 .stats { display:flex; gap:28px; flex-wrap:wrap } .stats div b { display:block; font-size:22px }
 table { width:100%; border-collapse:collapse } th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line) }
 th { color:var(--muted); font-weight:500; font-size:12px } td.num { text-align:right; font-variant-numeric:tabular-nums }
-td.nw { white-space:nowrap } tr.ongoing td { color:var(--bad); font-weight:600 }
+td.nw { white-space:nowrap } td.lines { white-space:pre-line } tr.ongoing td { color:var(--bad); font-weight:600 }
 .pill { display:inline-block; padding:1px 9px; border-radius:999px; font-size:12px; font-weight:600 }
 [hidden] { display:none !important }
 .scroll { max-height:420px; overflow:auto }
@@ -361,7 +361,8 @@ canvas { width:100%; height:150px; display:block }
       <p class="small muted">"Router said" is the ISP router's own status, read from its admin pages when the
         outage starts, every 30 s during it and every 5 minutes otherwise (only if a router capture is set up).
         For fibre: the GPON state (O5 = operational), whether the optical signal is present, and whether the
-        router has an internet address.</p>
+        router has an internet address. Each line is one state, in order, with the time since the outage began
+        from when it was first seen until the next state was (about 30 s precise).</p>
     </details>
   </div>
 
@@ -479,7 +480,7 @@ async function refresh() {
   s.outages.forEach(o => {
     const tr = row([fmtTime(o.start), o.ongoing ? 'ongoing' : fmtTime(o.end), fmtDur(o.duration_s),
       (o.ongoing ? 'in progress: ' + o.layer : o.layer) + (o.during ? ' (during the outage: ' + o.during + ')' : ''),
-      o.router], ['nw', 'nw', 'num nw', '', '']);
+      o.router], ['nw', 'nw', 'num nw', '', 'lines']);
     if (o.ongoing) tr.className = 'ongoing';
     ob.appendChild(tr);
   });
