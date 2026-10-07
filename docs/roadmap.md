@@ -71,8 +71,8 @@ Versioned releases and an install path others can trust.
 
 | Spike | Time-box | Depends on |
 |---|---|---|
-| [#17](https://github.com/johanhellman/linemon/issues/17) Versioned releases and a changelog from commit messages | 0.5 day | – |
-| [#18](https://github.com/johanhellman/linemon/issues/18) An install and upgrade path others can trust | 1 day | [#17](https://github.com/johanhellman/linemon/issues/17), [#4](https://github.com/johanhellman/linemon/issues/4) |
+| [#17](https://github.com/johanhellman/linemon/issues/17) Versioned releases and a changelog from commit messages ([findings](spikes/017-releases.md)) | 0.5 day | – |
+| [#18](https://github.com/johanhellman/linemon/issues/18) An install and upgrade path others can trust ([findings](spikes/018-install.md)) | 1 day | [#17](https://github.com/johanhellman/linemon/issues/17), [#4](https://github.com/johanhellman/linemon/issues/4) |
 
 ## Parked
 
@@ -85,6 +85,7 @@ Considered and deliberately not on the roadmap for now. Each needs a new reason 
 | Login for the web page | The page is designed for a trusted local network. Use a VPN or a reverse proxy for remote access instead of exposing linemon. |
 | Scripts for specific routers we don't have | Untestable without the hardware. The hook kit spike makes them possible for people who own those routers. |
 | A ready-made Raspberry Pi OS image | High maintenance for little gain over a package. Revisit after the packaging spike. |
+| A Debian package ([#18](https://github.com/johanhellman/linemon/issues/18)) | Without an apt repository it is downloaded by hand like the release archive, so it adds no automatic upgrades, only a second installer to keep in step with `install.sh` ([findings](spikes/018-install.md)). Revisit if there is an apt repository worth publishing to, or people ask for one. |
 | Capturing the route at the moment of an outage ([#11](https://github.com/johanhellman/linemon/issues/11)) | On the real line the router's own status already says where it broke (the fibre lost its registration), and the first ISP hop being down follows from that. A route sweep would add probes exactly during outages, against principle 5, for little new information. Revisit if outages appear that the hops and the router capture can't place. |
 | Live data from a UniFi gateway ([#14](https://github.com/johanhellman/linemon/issues/14)) | The gateway's own log matched all 31 outages it recorded, and the monitor is now the independent witness; an occasional support export is enough to compare. Revisit if the comparison becomes a regular need. |
 
