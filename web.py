@@ -298,7 +298,19 @@ canvas { width:100%; height:150px; display:block }
   <div class="banner" id="banner">…</div>
   <div class="banner sub" id="health-banner" hidden></div>
 
-  <div class="card"><h2>Internet outages</h2><div class="stats" id="stats"></div></div>
+  <div class="card"><h2>Internet outages</h2><div class="stats" id="stats"></div>
+    <h3 class="small" style="margin:14px 0 6px">Lost probes, last 24 hours</h3>
+    <canvas id="chart"></canvas>
+    <div class="legend small muted">
+      <span><i class="dot" style="background:var(--gw)"></i>ISP router</span>
+      <span><i class="dot" style="background:var(--hop)"></i>ISP hop 1</span>
+      <span><i class="dot" style="background:var(--inet)"></i>Internet (all three hosts)</span>
+    </div>
+  </div>
+
+  <div class="card"><h2>Internet outages, newest first</h2>
+    <div class="scroll"><table><thead><tr><th>Start</th><th>End</th><th class="num">Duration</th><th>Where it broke</th><th>Router said</th></tr></thead>
+    <tbody id="outages"></tbody></table></div></div>
 
   <div class="card" id="router-card" hidden>
     <h2>What the router reports</h2>
@@ -310,27 +322,17 @@ canvas { width:100%; height:150px; display:block }
     <div class="scroll" style="max-height:200px"><table><tbody id="sessions"></tbody></table></div>
   </div>
 
+  <div class="card"><h2>Targets</h2><div class="grid" id="targets"></div></div>
+
   <div class="card" id="health-card" hidden>
     <h2>Monitor health <span class="pill" id="health-pill"></span></h2>
     <p class="small muted" id="health-meta"></p>
     <table class="small"><tbody id="health-signals"></tbody></table>
   </div>
 
-  <div class="card">
-    <h2>Lost probes, last 24 hours</h2>
-    <canvas id="chart"></canvas>
-    <div class="legend small muted">
-      <span><i class="dot" style="background:var(--gw)"></i>ISP router</span>
-      <span><i class="dot" style="background:var(--hop)"></i>ISP hop 1</span>
-      <span><i class="dot" style="background:var(--inet)"></i>Internet (all three hosts)</span>
-    </div>
-  </div>
-
-  <div class="card"><h2>Targets</h2><div class="grid" id="targets"></div></div>
-
-  <div class="card"><h2>Internet outages, newest first</h2>
-    <div class="scroll"><table><thead><tr><th>Start</th><th>End</th><th class="num">Duration</th><th>Where it broke</th><th>Router said</th></tr></thead>
-    <tbody id="outages"></tbody></table></div></div>
+  <div class="card"><h2>Latest events</h2>
+    <div class="scroll"><table><thead><tr><th>Time</th><th>Target</th><th>Event</th><th class="num">Duration</th><th>Detail</th></tr></thead>
+    <tbody id="events"></tbody></table></div></div>
 
   <div class="card">
     <details>
@@ -363,9 +365,7 @@ canvas { width:100%; height:150px; display:block }
     </details>
   </div>
 
-  <div class="card"><h2>Latest events</h2>
-    <div class="scroll"><table><thead><tr><th>Time</th><th>Target</th><th>Event</th><th class="num">Duration</th><th>Detail</th></tr></thead>
-    <tbody id="events"></tbody></table></div></div>
+  <p class="muted small" id="footer"></p>
 </main>
 <script>
 const fmtTime = s => s ? new Date(s).toLocaleString([], {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
@@ -416,7 +416,8 @@ async function refresh() {
   catch (e) { document.getElementById('meta').textContent = 'Cannot reach the monitor: ' + e; return; }
 
   document.getElementById('meta').textContent =
-    `Monitoring since ${fmtTime(d.monitoring_since)} · router ${d.router || '?'} · last data ${fmtTime(d.last_data)} · updated ${fmtTime(d.now)} · linemon ${d.version || '?'}`;
+    `Monitoring since ${fmtTime(d.monitoring_since)} · router ${d.router || '?'} · last data ${fmtTime(d.last_data)} · updated ${fmtTime(d.now)}`;
+  document.getElementById('footer').textContent = `linemon ${d.version || '?'}`;
   const b = document.getElementById('banner'), h = d.health;
   if (d.stale) { b.className = 'banner warn'; b.textContent = 'No new measurements for over 3 minutes: is the monitor running?'; }
   else if (h && h.reporting && h.state === 'unhealthy') {
