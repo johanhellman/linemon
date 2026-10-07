@@ -11,8 +11,20 @@ What running on a real line has shown, and changes made outside a spike, are in
 
 ## Order
 
-Two spikes unblock most others, so they come first: **one config file** and **storage that stays fast**.
-After that, reports and notifications give the most value per hour of work.
+M1 is built and checked on a Pi, apart from tests that need hands on the hardware (#30, #53) and the
+optional push backup (#52). Revised on 7 Oct 2026 after a week on a real line, where evidence for the
+ISP was still assembled by hand:
+
+1. [#21](https://github.com/johanhellman/linemon/issues/21): the availability definitions on the
+   first real week.
+2. [#10](https://github.com/johanhellman/linemon/issues/10) with
+   [#17](https://github.com/johanhellman/linemon/issues/17): the evidence report, stating the
+   version that produced it.
+3. [#61](https://github.com/johanhellman/linemon/issues/61): router captures that time out while
+   the router is busy, since its status is the strongest evidence.
+4. Notifications ([#44](https://github.com/johanhellman/linemon/issues/44)-[#48](https://github.com/johanhellman/linemon/issues/48)),
+   then a quick prototype for [#12](https://github.com/johanhellman/linemon/issues/12) from the
+   per-minute data already recorded.
 
 ## M1 Unattended operation
 
@@ -41,7 +53,6 @@ Locate faults more precisely and measure line quality, including backup links.
 
 | Spike | Time-box | Depends on |
 |---|---|---|
-| [#11](https://github.com/johanhellman/linemon/issues/11) Capture the route at the moment of an outage | 1 day | – |
 | [#12](https://github.com/johanhellman/linemon/issues/12) Show line quality, not only outages | 1 day | [#5](https://github.com/johanhellman/linemon/issues/5) |
 | [#13](https://github.com/johanhellman/linemon/issues/13) Monitor a backup link alongside the main line | 1 day | [#4](https://github.com/johanhellman/linemon/issues/4), [#5](https://github.com/johanhellman/linemon/issues/5) |
 
@@ -51,7 +62,6 @@ Work with the gateway, monitoring tools and routers people already have.
 
 | Spike | Time-box | Depends on |
 |---|---|---|
-| [#14](https://github.com/johanhellman/linemon/issues/14) Live data from a UniFi gateway instead of support exports | 1 day | [#4](https://github.com/johanhellman/linemon/issues/4) |
 | [#15](https://github.com/johanhellman/linemon/issues/15) A metrics interface for Prometheus and Home Assistant | 0.5 day | [#8](https://github.com/johanhellman/linemon/issues/8) |
 | [#16](https://github.com/johanhellman/linemon/issues/16) Make it easy to add a capture script for another router | 1 day | – |
 
@@ -70,11 +80,13 @@ Considered and deliberately not on the roadmap for now. Each needs a new reason 
 
 | Idea | Why it is parked |
 |---|---|
-| Speed tests | They load the line being measured, can trigger the very faults linemon records, use data caps, and need a dependency. Conflicts with principle 5. |
+| Speed tests | They load the line being measured, can trigger the very faults linemon records, use data caps, and need a dependency. Conflicts with principle 5. A Pi measuring a fast line over TLS from Python may also report its own limit as the line's speed (not measured), which would undermine principle 2. If an ISP dispute is ever about speed, an on-demand tool in `tools/` run for an agreed test, like `browse.py`, fits better than a daily test. |
 | IPv6 probes | Can't be developed or tested until the ISP provides IPv6 on the line. Revisit then. |
 | Login for the web page | The page is designed for a trusted local network. Use a VPN or a reverse proxy for remote access instead of exposing linemon. |
 | Scripts for specific routers we don't have | Untestable without the hardware. The hook kit spike makes them possible for people who own those routers. |
 | A ready-made Raspberry Pi OS image | High maintenance for little gain over a package. Revisit after the packaging spike. |
+| Capturing the route at the moment of an outage ([#11](https://github.com/johanhellman/linemon/issues/11)) | On the real line the router's own status already says where it broke (the fibre lost its registration), and the first ISP hop being down follows from that. A route sweep would add probes exactly during outages, against principle 5, for little new information. Revisit if outages appear that the hops and the router capture can't place. |
+| Live data from a UniFi gateway ([#14](https://github.com/johanhellman/linemon/issues/14)) | The gateway's own log matched all 31 outages it recorded, and the monitor is now the independent witness; an occasional support export is enough to compare. Revisit if the comparison becomes a regular need. |
 
 ## Proposing something new
 
