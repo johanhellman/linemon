@@ -56,9 +56,10 @@ _captures_cache = {}  # path -> {'ino', 'offset', 'items'}; guarded by _captures
 _captures_lock = threading.Lock()
 
 
-# The same rule as linemon.py's plain_error and plain_summary, which apply it when a capture is
-# written. It is applied again here so that lines written before that, or by hand, can't put
-# exception text or file paths on the page or in the CSV.
+# A capture's `error` and `summary` reach the page, which has no login, and the CSV. Hooks are asked
+# for short fixed messages (docs/checks.md#the-hook-contract), but one may not follow that and lines
+# written before #75 don't, so everything read from captures.jsonl is cut back to a plain message.
+# The full text stays in captures.jsonl and the journal for the owner.
 CAPTURE_FAILED = 'capture failed; see journalctl -u linemon'
 PLAIN_MESSAGE = re.compile(r"[\w ,.;:()'?+-]{1,100}")
 SUMMARY_MAX = 200
