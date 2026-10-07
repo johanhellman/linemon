@@ -40,6 +40,13 @@ import xml.etree.ElementTree as ET
 CONFIG = os.environ.get('LINEMON_ROUTER_CONF', '/etc/linemon/router.conf')
 DATA_DIR = os.environ.get('LINEMON_DATA', '/var/lib/linemon')
 LOGIN_BACKOFF_S = 1800
+# While the router re-registers on the fibre, which is when captures matter most, its web pages can
+# take well over 8 s to answer (seen 05-07/10/2026: a request with no answer after 8 s was the main
+# reason captures failed during outages, while other captures took up to 18 s in total).
+REQUEST_TIMEOUT_S = 20
+# The whole capture stays within this, so it ends and says why before linemon gives up on the
+# script (--hook-timeout, 30 s by default).
+BUDGET_S = 25
 
 # ITU-T G.984.3 ONU activation states, as reported in RegStatus
 GPON_STATES = {
@@ -117,9 +124,12 @@ def summarise(led, wan):
 
 
 class Router:
-    def __init__(self, host, username, password, timeout=8, debug=False):
+    def __init__(self, host, username, password, timeout=None, budget=None, debug=False):
         self.base = f'http://{host}/'
-        self.username, self.password, self.timeout, self.debug = username, password, timeout, debug
+        self.username, self.password, self.debug = username, password, debug
+        self.timeout = timeout or REQUEST_TIMEOUT_S
+        self.budget = budget or BUDGET_S
+        self.deadline = time.monotonic() + self.budget
         self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookies))
         self.session_token = ''
@@ -128,10 +138,20 @@ class Router:
         req = urllib.request.Request(self.base + '?' + query if query else self.base,
                                      data=urllib.parse.urlencode(data).encode() if data is not None else None,
                                      headers={'Referer': self.base, 'X-Requested-With': 'XMLHttpRequest'})
-        with self.opener.open(req, timeout=self.timeout) as r:
-            body = r.read().decode('utf-8', 'replace')
-            if self.debug:
-                self._trace(req, r, data, body)
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f'capture took longer than {self.budget:g} s')
+        started = time.monotonic()
+        try:
+            with self.opener.open(req, timeout=min(self.timeout, remaining)) as r:
+                body = r.read().decode('utf-8', 'replace')
+                if self.debug:
+                    self._trace(req, r, data, body)
+        except (TimeoutError, OSError) as e:
+            # For the journal: which request, and how long it waited (the query holds no secrets).
+            print(f'{req.get_method()} {query or "home page"} failed after {time.monotonic() - started:.1f} s: {e}',
+                  file=sys.stderr)
+            raise
         # Every page embeds a fresh session token, and only the latest one is
         # accepted for POSTs such as logout.
         m = re.search(r'_sessionTmpToken = "([^"]*)"', body)
