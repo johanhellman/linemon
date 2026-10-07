@@ -1973,6 +1973,18 @@ class Versions(unittest.TestCase):
         self.assertIn(f'version={linemon.version()}', start)
         self.assertEqual(web.status(tmp)['version'], analyze.version())
 
+    def test_version_needs_no_settings(self):
+        """/etc/linemon is root-only on the Pi, so --version must answer before reading it."""
+        import subprocess
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        unreadable = os.path.join(tmp, 'linemon.conf')
+        with open(unreadable, 'w') as f:
+            f.write('[monitor]\nthreshold = nope\n')                         # would fail if it were read
+        r = subprocess.run([sys.executable, os.path.join(ROOT, 'linemon.py'), '--config', unreadable, '--version'],
+                           capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, f'linemon {linemon.version()}'), r.stderr)
+
     def test_install_writes_the_exact_version(self):
         with open(os.path.join(ROOT, 'install.sh')) as f:
             script = f.read()

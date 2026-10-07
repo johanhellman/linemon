@@ -897,6 +897,7 @@ def main():
         pre.add_argument('--env-file', default=ENV_PATH)
         pre.add_argument('--check-config', action='store_true')
         pre.add_argument('--migrate', action='store_true')
+        pre.add_argument('--version', action='version', version=f'linemon {version()}')  # without reading settings
         mode, _ = pre.parse_known_args(argv)
         if mode.migrate:
             args = build_parser({}).parse_args(read_env_args(mode.env_file))
