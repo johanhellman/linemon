@@ -373,6 +373,11 @@ From the responses it reports:
 router has an address. The raw XML responses are saved for outage captures, not for
 periodic ones. After a rejected login it does not try again for 30 minutes.
 
+While the router re-registers on the fibre, its web pages can be slow, which is exactly when a
+capture matters. Each request may take up to 20 seconds, and the whole capture gives up after
+25, so it reports its own error before linemon's `--hook-timeout` (30 s) would stop it. A request
+that fails is logged to the journal with how long it waited, never with the password or tokens.
+
 ## Data files
 
 All in `/var/lib/linemon`. Times are ISO 8601 in local time with the UTC offset, e.g.

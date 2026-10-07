@@ -99,6 +99,7 @@ class FakeLivebox(BaseHTTPRequestHandler):
     page = None
     token_counter = 0
     current_token = None
+    delay = {}  # _tag (or 'home') -> seconds to wait before answering, like the router while it resyncs
 
     def log_message(self, *args):
         pass
@@ -129,6 +130,7 @@ class FakeLivebox(BaseHTTPRequestHandler):
     def do_GET(self):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         tag = q.get('_tag', [''])[0]
+        time.sleep(FakeLivebox.delay.get(tag or 'home', 0))
         if not q:
             if self.logged_in():
                 FakeLivebox.page = 'home'
@@ -176,7 +178,7 @@ class LiveboxCapture(unittest.TestCase):
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), FakeLivebox)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.tmp = tempfile.mkdtemp()
-        FakeLivebox.logins, FakeLivebox.logouts = [], []
+        FakeLivebox.logins, FakeLivebox.logouts, FakeLivebox.delay = [], [], {}
 
     def tearDown(self):
         if self.server:
@@ -184,7 +186,7 @@ class LiveboxCapture(unittest.TestCase):
             self.server.server_close()
         shutil.rmtree(self.tmp)
 
-    def capture(self, password, reason='outage-start', mode=0o600):
+    def capture(self, password, reason='outage-start', mode=0o600, **settings):
         conf = os.path.join(self.tmp, 'router.conf')
         if os.path.exists(conf):
             os.chmod(conf, 0o600)  # a previous call may have made it read-only
@@ -195,7 +197,47 @@ class LiveboxCapture(unittest.TestCase):
         os.makedirs(capture_dir, exist_ok=True)
         os.environ.update(LINEMON_ROUTER_CONF=conf, LINEMON_DATA=self.tmp,
                           LINEMON_CAPTURE_DIR=capture_dir, LINEMON_REASON=reason)
-        return load_router_module().capture(), capture_dir
+        module = load_router_module()
+        for name, value in settings.items():  # e.g. REQUEST_TIMEOUT_S, scaled down so the tests stay quick
+            setattr(module, name, value)
+        return module.capture(), capture_dir
+
+    def test_a_slow_router_is_waited_for(self):
+        """An answer slower than the old 8 s limit (here scaled: 0.6 s against a 1 s limit) still counts (#61)."""
+        import contextlib
+        import io
+        FakeLivebox.delay = {'login_token': 0.6}
+        with contextlib.redirect_stderr(io.StringIO()):
+            result, _ = self.capture('correct horse', REQUEST_TIMEOUT_S=1.0, BUDGET_S=5)
+        self.assertTrue(result['ok'], result)
+        module = load_router_module()
+        self.assertGreater(module.REQUEST_TIMEOUT_S, 8)                       # what failed most captures
+        hook_timeout = next(o[4] for o in linemon.OPTIONS if o[:2] == ('hook', 'timeout'))
+        self.assertLess(module.BUDGET_S, hook_timeout)                         # it ends before linemon kills it
+
+    def test_a_request_with_no_answer_is_logged_and_reported(self):
+        import contextlib
+        import io
+        FakeLivebox.delay = {'login_token': 1.0}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result, _ = self.capture('correct horse', REQUEST_TIMEOUT_S=0.3, BUDGET_S=5)
+        self.assertIn('router not reachable', result['error'])
+        self.assertIn('_tag=login_token failed after 0.3 s', err.getvalue())  # for the journal
+        self.assertNotIn('correct horse', err.getvalue())
+
+    def test_the_whole_capture_stays_within_its_budget(self):
+        """Every page slow: it gives up by itself, before linemon would kill it, and says why."""
+        import contextlib
+        import io
+        FakeLivebox.delay = {tag: 0.4 for tag in ('home', 'login_entry', 'login_token', 'vmenu-ledstatus',
+                                                  'wan_internetstatus_lua.lua', 'osp_led_status_orange_lua.lua')}
+        started = time.monotonic()
+        with contextlib.redirect_stderr(io.StringIO()):
+            result, _ = self.capture('correct horse', REQUEST_TIMEOUT_S=1.0, BUDGET_S=1.5)
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertIn('error', result)
+        self.assertNotIn('Traceback', result['error'])
 
     def test_login_read_logout(self):
         result, capture_dir = self.capture('correct horse')
