@@ -298,6 +298,8 @@ canvas { width:100%; height:150px; display:block }
   <div class="banner" id="banner">…</div>
   <div class="banner sub" id="health-banner" hidden></div>
 
+  <div class="card"><h2>Targets</h2><div class="grid" id="targets"></div></div>
+
   <div class="card"><h2>Internet outages</h2><div class="stats" id="stats"></div>
     <h3 class="small" style="margin:14px 0 6px">Lost probes, last 24 hours</h3>
     <canvas id="chart"></canvas>
@@ -321,8 +323,6 @@ canvas { width:100%; height:150px; display:block }
       session means the operator's side dropped and re-established the connection.</p>
     <div class="scroll" style="max-height:200px"><table><tbody id="sessions"></tbody></table></div>
   </div>
-
-  <div class="card"><h2>Targets</h2><div class="grid" id="targets"></div></div>
 
   <div class="card" id="health-card" hidden>
     <h2>Monitor health <span class="pill" id="health-pill"></span></h2>
