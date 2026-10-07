@@ -39,6 +39,9 @@ not a quiet exception.
 7. **Private by default.** Data stays on the device and the local network. Nothing is
    sent anywhere unless the user configures it, and reports leave out personal details
    unless the user adds them.
+8. **Proportional to the project.** linemon is a small tool for one line. Choose the simplest
+   thing that does the job: a few lines over a new script, one place over two kept in sync,
+   no option, abstraction or process until it is clearly needed. Say what was left out and why.
 
 ## Boundaries
 
