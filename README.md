@@ -251,7 +251,8 @@ python3 /opt/linemon/report.py --from 2026-10-01T18:00 --to 2026-10-08T18:00 --l
 ```
 
 writes one HTML page for the period: how much of it the monitor observed, availability, every
-internet outage with where the path broke and what the router reported, how it was measured,
+internet outage with where the path broke and what the router reported, how long the router reported
+each state across those outages, how it was measured,
 and the linemon version. `--lang` is `en` or `es`. Open it in a browser and print it to PDF if a
 PDF is wanted. The figures are the analyzer's. It holds no personal details or addresses; add
 your customer or ticket number in the message it goes with.
