@@ -9,3 +9,4 @@ linemon-backup-*/
 captures.jsonl
 path.log
 health.json
+.claude/worktrees/
