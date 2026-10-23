@@ -333,25 +333,9 @@ def load_events(data_dir):
 
 
 def router_change(rows):
-    """The last 'monitor,gateway' event that moved to a different router, or None.
-
-    A monitor that starts before the network is up (e.g. right after the Pi reboots) logs
-    'None -> 192.168.1.1' once it finds the router; that is the same router as before, not a move.
-    """
-    known, change = None, None
-    for r in rows:
-        if r['target'] != 'monitor':
-            continue
-        if r['event'] == 'start':
-            found = re.search(r'\bgateway=(\S+)', r['detail'])
-            if found and found.group(1) != 'None':
-                known = found.group(1)
-        elif r['event'] == 'gateway':
-            gateway = r['detail'].rpartition(' -> ')[2]
-            if known is not None and gateway != known:
-                change = r
-            known = gateway
-    return change
+    """The last 'monitor,gateway' event, or None."""
+    changes = [r for r in rows if r['target'] == 'monitor' and r['event'] == 'gateway']
+    return changes[-1] if changes else None
 
 
 def load_outages(data_dir, include_all=False):

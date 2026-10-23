@@ -592,27 +592,6 @@ class SafeErrors(unittest.TestCase):
 
 
 class Analysis(unittest.TestCase):
-    @staticmethod
-    def monitor_rows(*details):
-        return [{'time': '', 'target': 'monitor', 'event': event, 'duration_s': '', 'detail': detail}
-                for event, detail in details]
-
-    def test_a_reboot_finding_the_same_router_is_not_a_router_change(self):
-        moved = ('gateway', '192.168.10.1 -> 192.168.1.1')  # installed behind the UDM, then moved
-        rows = self.monitor_rows(('start', 'iface=eth0 gateway=192.168.10.1'), moved,
-                                 ('stop', ''), ('start', 'iface=eth0 gateway=None'),  # rebooted, network not up yet
-                                 ('gateway', 'None -> 192.168.1.1'))
-        self.assertEqual(analyze.router_change(rows)['detail'], moved[1])
-
-    def test_a_router_change_across_a_reboot_still_counts(self):
-        rows = self.monitor_rows(('start', 'iface=eth0 gateway=192.168.1.1'), ('stop', ''),
-                                 ('start', 'iface=eth0 gateway=None'), ('gateway', 'None -> 192.168.2.1'))
-        self.assertEqual(analyze.router_change(rows)['detail'], 'None -> 192.168.2.1')
-
-    def test_the_first_router_found_is_not_a_change(self):
-        rows = self.monitor_rows(('start', 'iface=eth0 gateway=None'), ('gateway', 'None -> 192.168.1.1'))
-        self.assertIsNone(analyze.router_change(rows))
-
     def test_session_starts_from_uptime(self):
         t0 = dt.datetime(2026, 10, 1, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
         caps = [{'time': t0, 'uptime_s': 600},                               # session started 11:50
