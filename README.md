@@ -124,7 +124,7 @@ short to catch during it.
 
 Included: **`routers/zte_livebox.py`** for the ZTE-made Livebox 6s (ZXHN F6640P) used by
 Orange, MasOrange and Pepephone in Spain. It reports the fibre's GPON state (O5 =
-operational), loss of signal, whether the router has an internet address, and the
+operational), loss of signal (not the optical power level), whether the router has an internet address, and the
 connection uptime.
 
 Set it up on the monitor:
@@ -152,7 +152,7 @@ Set it up on the monitor:
    It keeps working: the warning is there to be fixed, not to stop your captures.
 
 2. Test it. It should print `"ok": true` and a summary like
-   `fibre O5 operational · signal OK · internet up`:
+   `fibre O5 operational · no LOS · internet up`:
 
    ```bash
    sudo /opt/linemon/routers/zte_livebox.py --test

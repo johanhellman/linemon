@@ -44,7 +44,7 @@ if you like, `details`. Raise `LoginError` when the router rejects the login. Us
 `urllib.request` with a cookie jar, as the Livebox script's `Router` class does, and give every
 request a timeout.
 
-Keep `summary` short and plain, e.g. `fibre O5 operational · signal OK · internet up`. If the
+Keep `summary` short and plain, e.g. `fibre O5 operational · no LOS · internet up`. If the
 router reports an uptime, return it: linemon uses it to date when the operator restarted the
 internet session.
 

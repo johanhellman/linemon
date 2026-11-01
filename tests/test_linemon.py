@@ -70,14 +70,14 @@ class LiveboxParsing(unittest.TestCase):
     def test_healthy(self):
         s = self.summary('led_ok.xml', 'wan_ok.xml')
         self.assertTrue(s['ok'])
-        self.assertEqual(s['summary'], 'fibre O5 operational · signal OK · internet up')
+        self.assertEqual(s['summary'], 'fibre O5 operational · no LOS · internet up')
         self.assertEqual(s['uptime_s'], 1060)
         self.assertEqual(s['details']['vlan'], '20')
 
     def test_fibre_up_but_no_ip(self):
         s = self.summary('led_no_ip.xml', 'wan_no_ip.xml')
         self.assertFalse(s['ok'])
-        self.assertEqual(s['summary'], 'fibre O5 operational · signal OK · no IP (ERROR_NO_ANSWER)')
+        self.assertEqual(s['summary'], 'fibre O5 operational · no LOS · no IP (ERROR_NO_ANSWER)')
         self.assertIsNone(s['uptime_s'])
 
     def test_loss_of_signal(self):
@@ -612,6 +612,18 @@ class Analysis(unittest.TestCase):
     def test_the_first_router_found_is_not_a_change(self):
         rows = self.monitor_rows(('start', 'iface=eth0 gateway=None'), ('gateway', 'None -> 192.168.1.1'))
         self.assertIsNone(analyze.router_change(rows))
+
+    def test_current_router_without_a_change(self):
+        rows = self.monitor_rows(('start', 'iface=eth0 gateway=10.0.0.1'), ('stop', ''),
+                                 ('start', 'iface=eth0 gateway=10.0.0.1'))
+        self.assertIsNone(analyze.router_change(rows))
+        self.assertEqual(analyze.current_router(rows), '10.0.0.1')
+
+    def test_current_router_follows_a_move_and_ignores_a_lost_router(self):
+        rows = self.monitor_rows(('start', 'iface=eth0 gateway=10.0.1.1'),
+                                 ('gateway', '10.0.1.1 -> 10.0.0.1'), ('gateway', '10.0.0.1 -> None'))
+        self.assertEqual(analyze.current_router(rows), '10.0.0.1')
+        self.assertIsNone(analyze.current_router(self.monitor_rows(('start', 'iface=eth0 gateway=None'))))
 
     def test_session_starts_from_uptime(self):
         t0 = dt.datetime(2026, 10, 1, 12, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))

@@ -188,7 +188,7 @@ def _offset(seconds):
 def router_during(captures, start, end, slack=5, sep='\n'):
     """What the router reported during an outage (`captures` sorted by time), as a timeline: one
     line per state, with when it was first and last seen relative to the start of the outage, e.g.
-    '0:05–40:10 fibre O2 standby · signal OK · no IP'. A state is taken to last until the next one
+    '0:05–40:10 fibre O2 standby · no LOS · no IP'. A state is taken to last until the next one
     was first seen (or the outage ended), so the times are as precise as the captures, about 30 s
     apart. Failed captures say nothing about the state and are left out, unless all of them failed."""
     lo, hi = start - dt.timedelta(seconds=slack), end + dt.timedelta(seconds=slack)
@@ -332,6 +332,19 @@ def load_events(data_dir):
     return sorted(rows, key=lambda r: parse_time(r['time']))
 
 
+def gateways(rows):
+    """(row, router address) for each 'monitor' event that names the router it found."""
+    for r in rows:
+        if r['target'] != 'monitor':
+            continue
+        if r['event'] == 'start':
+            found = re.search(r'\bgateway=(\S+)', r['detail'])
+            if found and found.group(1) != 'None':
+                yield r, found.group(1)
+        elif r['event'] == 'gateway':
+            yield r, r['detail'].rpartition(' -> ')[2]
+
+
 def router_change(rows):
     """The last 'monitor,gateway' event that moved to a different router, or None.
 
@@ -339,19 +352,17 @@ def router_change(rows):
     'None -> 192.168.1.1' once it finds the router; that is the same router as before, not a move.
     """
     known, change = None, None
-    for r in rows:
-        if r['target'] != 'monitor':
-            continue
-        if r['event'] == 'start':
-            found = re.search(r'\bgateway=(\S+)', r['detail'])
-            if found and found.group(1) != 'None':
-                known = found.group(1)
-        elif r['event'] == 'gateway':
-            gateway = r['detail'].rpartition(' -> ')[2]
-            if known is not None and gateway != known:
-                change = r
-            known = gateway
+    for r, gateway in gateways(rows):
+        if r['event'] == 'gateway' and known is not None and gateway != known:
+            change = r
+        known = gateway
     return change
+
+
+def current_router(rows):
+    """The address of the router the monitor last found, or None if it never found one."""
+    found = [gateway for _, gateway in gateways(rows) if gateway != 'None']
+    return found[-1] if found else None
 
 
 def load_outages(data_dir, include_all=False):

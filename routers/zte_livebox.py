@@ -5,7 +5,7 @@ A linemon capture hook: logs in to the router's web interface, reads the same
 data as its "estado de los indicadores luminosos (LED)" and home pages, logs
 out, and prints one JSON line:
 
-  {"ok": true, "summary": "fibre O5 operational · signal OK · internet up",
+  {"ok": true, "summary": "fibre O5 operational · no LOS · internet up",
    "uptime_s": 1060, "details": {...}}
 
   zte_livebox.py          run as a linemon hook (uses LINEMON_* environment)
@@ -107,7 +107,7 @@ def summarise(led, wan):
     has_ip = internet.get('ConnStatus') == 'Connected' and internet.get('IPAddress', '0.0.0.0') != '0.0.0.0'
     fibre_ok = reg == 5 and not los
 
-    parts = [f"fibre {GPON_STATES.get(reg, f'state {reg}')}", 'NO SIGNAL (LOS)' if los else 'signal OK']
+    parts = [f"fibre {GPON_STATES.get(reg, f'state {reg}')}", 'NO SIGNAL (LOS)' if los else 'no LOS']
     if has_ip:
         parts.append('internet up')
     else:

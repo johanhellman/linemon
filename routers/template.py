@@ -36,7 +36,7 @@ def read_status(host, username, password):
     """Log in, read the router's status, log out, and return a dict with:
 
       ok        True if the router says its line and internet connection are healthy
-      summary   one line for people, e.g. 'fibre O5 operational · signal OK · internet up'
+      summary   one line for people, e.g. 'fibre O5 operational · no LOS · internet up'
       uptime_s  seconds since the internet connection was established, or None
       details   anything else worth keeping (optional)
 
