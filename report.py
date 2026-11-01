@@ -78,7 +78,7 @@ TEXT = {
              'más allá de los primeros routers del operador (estos respondían)'),
             ('cable link down', 'cable del monitor desconectado'), ('still down', 'aún caído'),
             ('capture failed', 'lectura fallida'), ('NO SIGNAL (LOS)', 'SIN SEÑAL (LOS)'),
-            ('signal OK', 'señal OK'), ('internet up', 'internet conectado'), ('no IP', 'sin IP'),
+            ('no LOS', 'sin LOS'), ('signal OK', 'señal OK'), ('internet up', 'internet conectado'), ('no IP', 'sin IP'),
             ('fibre ', 'fibra '), ('router not reachable', 'router inaccesible'),
             ('reading status failed', 'lectura del estado fallida'),
         ],

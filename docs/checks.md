@@ -328,7 +328,7 @@ It must print one JSON object on its last line of output. linemon understands:
 | Key | Meaning |
 |---|---|
 | `ok` | `true` if the router reports everything healthy |
-| `summary` | One line of text for people, shown as "Router said". For each outage the page, the CSV and the report show the summaries as a timeline: one line per state, in order, with the time since the outage began when it was first seen and until the next state was seen, e.g. `0:35–45:33 fibre O5 operational · signal OK · no IP`. The times are as precise as the captures (about 30 s apart); failed captures are left out unless all of them failed. |
+| `summary` | One line of text for people, shown as "Router said". For each outage the page, the CSV and the report show the summaries as a timeline: one line per state, in order, with the time since the outage began when it was first seen and until the next state was seen, e.g. `0:35–45:33 fibre O5 operational · no LOS · no IP`. The times are as precise as the captures (about 30 s apart); failed captures are left out unless all of them failed. |
 | `uptime_s` | Seconds since the router's internet connection was established, if it has one |
 | `error` | Set instead of the above when the capture failed. Shown on the web page, which has no login: use a short fixed message such as `router not reachable`, never the router's reply, exception text or a file path. |
 
@@ -375,7 +375,7 @@ From the responses it reports:
 | Field | Source | Meaning |
 |---|---|---|
 | GPON state | `RegStatus` | The fibre registration state from ITU-T G.984.3: 5 = O5 operational; 1–4 = not (yet) registered; 6–7 = fault states |
-| Signal | `LosInfo` | Loss of optical signal: anything but 0 means the fibre is not receiving light |
+| Signal | `LosInfo` | Loss of optical signal: anything but 0 means the fibre is not receiving light. The summary says `no LOS` or `NO SIGNAL (LOS)`; the pages read carry no optical power, so `no LOS` means light arrives, not that the level is good. Captures before 2026-11 say `signal OK` for the same thing |
 | Internet | `ConnStatus`, `IPAddress`, `ConnError` | Whether the internet connection (VLAN 20 on this ISP) is connected and has an address |
 | Uptime | `UpTime` | Seconds since the internet connection was established |
 
@@ -447,7 +447,7 @@ for example:
 
 ```json
 {"time": "2026-10-01T17:06:04.120+02:00", "reason": "outage-start", "ok": false,
- "summary": "fibre O5 operational · signal OK · no IP", "uptime_s": null,
+ "summary": "fibre O5 operational · no LOS · no IP", "uptime_s": null,
  "details": {"gpon_state": 5, "los": false, "conn_status": "Connecting", ...},
  "files": "captures/20261001T170604-outage-start"}
 ```
