@@ -154,7 +154,6 @@ def status(data_dir):
     events = analyze.load_events(data_dir)
     outages, periods = analyze.load_outages(data_dir)
     last_data = analyze.last_minute_end(data_dir)
-    change = analyze.router_change(events)
 
     targets = []
     for name in TARGETS:
@@ -200,7 +199,7 @@ def status(data_dir):
         'now': iso(now),
         'version': analyze.version(),
         'monitoring_since': iso(periods[0][0]) if periods else None,
-        'router': change['detail'].split('->')[-1].strip() if change else None,
+        'router': analyze.current_router(events),
         'last_data': iso(last_data),
         'stale': stale,
         'health': read_health(data_dir, now),
