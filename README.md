@@ -124,8 +124,9 @@ short to catch during it.
 
 Included: **`routers/zte_livebox.py`** for the ZTE-made Livebox 6s (ZXHN F6640P) used by
 Orange, MasOrange and Pepephone in Spain. It reports the fibre's GPON state (O5 =
-operational), loss of signal (not the optical power level), whether the router has an internet address, and the
-connection uptime.
+operational), loss of signal, the optical power the fibre delivers (Rx/Tx in dBm, with the
+ONT's temperature, voltage and bias current), whether the router has an internet address,
+and the connection uptime.
 
 Set it up on the monitor:
 

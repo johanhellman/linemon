@@ -359,8 +359,9 @@ canvas { width:100%; height:150px; display:block }
         unknown in the availability figures, never as up.</p>
       <p class="small muted">"Router said" is the ISP router's own status, read from its admin pages when the
         outage starts, every 30 s during it and every 5 minutes otherwise (only if a router capture is set up).
-        For fibre: the GPON state (O5 = operational), whether the optical signal is present, and whether the
-        router has an internet address. Each line is one state, in order, with the time since the outage began
+        For fibre: the GPON state (O5 = operational), whether the optical signal is present, the received optical
+        power (Rx, to the whole dBm) when the router reports it, and whether the router has an internet address.
+        Each line is one state, in order, with the time since the outage began
         from when it was first seen until the next state was (about 30 s precise).</p>
     </details>
   </div>

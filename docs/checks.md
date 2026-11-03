@@ -367,7 +367,10 @@ web pages do:
    itself is never sent.
 2. **Read** `/?_type=menuData&_tag=osp_led_status_orange_lua.lua` (the LED page) and
    `/?_type=menuData&_tag=wan_internetstatus_lua.lua&TypeUplink=2&pageType=1`
-   (the internet connection).
+   (the internet connection), then `/?_type=menuData&_tag=osp_poninfo_status_lua.lua`
+   (the *Parámetros del sistema > FIBRA* page, opened with `menuView&_tag=ospPoninfolStatus`)
+   for the optical readings. That last page is optional: if it fails or the router is too
+   slow for it, the capture keeps the rest and the journal says `optical power not read`.
 3. **Log out** with `POST /?_type=loginData&_tag=logout_entry`.
 
 From the responses it reports:
@@ -375,12 +378,15 @@ From the responses it reports:
 | Field | Source | Meaning |
 |---|---|---|
 | GPON state | `RegStatus` | The fibre registration state from ITU-T G.984.3: 5 = O5 operational; 1–4 = not (yet) registered; 6–7 = fault states |
-| Signal | `LosInfo` | Loss of optical signal: anything but 0 means the fibre is not receiving light. The summary says `no LOS` or `NO SIGNAL (LOS)`; the pages read carry no optical power, so `no LOS` means light arrives, not that the level is good. Captures before 2026-11 say `signal OK` for the same thing |
+| Signal | `LosInfo` | Loss of optical signal: anything but 0 means the fibre is not receiving light. The summary says `no LOS` or `NO SIGNAL (LOS)`: light arrives, which says nothing about its level (see optical power). Captures before 2026-11 say `signal OK` for the same thing |
+| Optical power | `RxPower`, `TxPower` (dBm) | What the ONT receives from and sends to the fibre, from the FIBRA page. The summary shows it to the whole dB (`Rx -20 dBm`), so an outage's timeline only splits on a real change; `details` has `rx_power_dbm` and `tx_power_dbm` to 0.001 dB. GPON class B+ receivers work from about −8 to −27 dBm. Captures before 2026-11 have none |
+| ONT health | `Temp`, `Volt` (mV), `Current` | `details.onu_temp_c`, `onu_voltage_v`, `onu_bias_ma` (laser bias current). On the Livebox seen so far these readings did not change for at least 30 minutes, so a value may be the router's last measurement rather than a live one; compare captures over time before reading much into a single one |
 | Internet | `ConnStatus`, `IPAddress`, `ConnError` | Whether the internet connection (VLAN 20 on this ISP) is connected and has an address |
 | Uptime | `UpTime` | Seconds since the internet connection was established |
 
 `ok` is true only when the fibre is operational, there is no loss of signal and the
-router has an address. The raw XML responses are saved for outage captures, not for
+router has an address; the optical readings don't change `ok`. The raw XML responses
+(`led_status.xml`, `wan_status.xml`, `pon_status.xml`) are saved for outage captures, not for
 periodic ones. After a rejected login it does not try again for 30 minutes.
 
 A failed capture reports one of these fixed errors, with the details (the exception, the
