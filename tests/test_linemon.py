@@ -85,6 +85,22 @@ class LiveboxParsing(unittest.TestCase):
         self.assertFalse(s['ok'])
         self.assertTrue(s['summary'].startswith('fibre O1 initial · NO SIGNAL (LOS)'))
 
+    def test_optical_power_from_the_fibra_page(self):
+        s = self.mod.summarise(self.mod.parse_xml(fixture('led_ok.xml')), self.mod.parse_xml(fixture('wan_ok.xml')),
+                               self.mod.parse_xml(fixture('pon_ok.xml')))
+        self.assertEqual(s['summary'], 'fibre O5 operational · no LOS · Rx -20 dBm · internet up')
+        self.assertEqual({k: s['details'][k] for k in ('rx_power_dbm', 'tx_power_dbm', 'onu_temp_c', 'onu_voltage_v',
+                                                        'onu_bias_ma')},
+                         {'rx_power_dbm': -20.123, 'tx_power_dbm': 2.1, 'onu_temp_c': 45.5,
+                          'onu_voltage_v': 3.3, 'onu_bias_ma': 10.5})
+
+    def test_unreadable_optical_values_are_left_out(self):
+        pon = {'OBJ_PON_OPTICALPARA_ID': [{'RxPower': '', 'TxPower': 'n/a', 'Temp': '40'}]}
+        s = self.mod.summarise(self.mod.parse_xml(fixture('led_ok.xml')), self.mod.parse_xml(fixture('wan_ok.xml')), pon)
+        self.assertEqual(s['summary'], 'fibre O5 operational · no LOS · internet up')
+        self.assertNotIn('rx_power_dbm', s['details'])
+        self.assertEqual(s['details']['onu_temp_c'], 40.0)
+
     def test_router_error_response(self):
         with self.assertRaises(ValueError):
             self.mod.parse_xml('<ajax_response_xml_root><IF_ERRORSTR>SessionTimeout</IF_ERRORSTR></ajax_response_xml_root>')
@@ -155,6 +171,8 @@ class FakeLivebox(BaseHTTPRequestHandler):
             self.reply(fixture('led_ok.xml')) if FakeLivebox.page == 'vmenu-ledstatus' else self.session_timeout()
         elif tag == 'wan_internetstatus_lua.lua':
             self.reply(fixture('wan_ok.xml')) if FakeLivebox.page == 'home' else self.session_timeout()
+        elif tag == 'osp_poninfo_status_lua.lua':
+            self.reply(fixture('pon_ok.xml')) if FakeLivebox.page == 'ospPoninfolStatus' else self.session_timeout()
         else:
             self.session_timeout()
 
@@ -251,7 +269,28 @@ class LiveboxCapture(unittest.TestCase):
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['uptime_s'], 1060)
         self.assertEqual(FakeLivebox.logouts, [True])  # logged out with the latest session token
-        self.assertEqual(sorted(os.listdir(capture_dir)), ['led_status.xml', 'wan_status.xml'])
+        self.assertEqual(sorted(os.listdir(capture_dir)), ['led_status.xml', 'pon_status.xml', 'wan_status.xml'])
+        self.assertEqual(result['details']['rx_power_dbm'], -20.123)
+
+    def test_a_missing_fibra_page_still_gives_the_status(self):
+        """The optical page is extra: if the router won't serve it, the capture keeps the rest."""
+        import contextlib
+        import io
+        FakeLivebox.broken = {'osp_poninfo_status_lua.lua'}
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result, _ = self.capture('correct horse')
+        self.assertTrue(result['ok'], result)
+        self.assertNotIn('rx_power_dbm', result['details'])
+        self.assertIn('optical power not read', err.getvalue())
+
+    def test_a_slow_fibra_page_still_gives_the_status(self):
+        import contextlib
+        import io
+        FakeLivebox.delay = {'osp_poninfo_status_lua.lua': 1.0}
+        with contextlib.redirect_stderr(io.StringIO()):
+            result, _ = self.capture('correct horse', REQUEST_TIMEOUT_S=0.3, BUDGET_S=5)
+        self.assertTrue(result['ok'], result)
+        self.assertNotIn('rx_power_dbm', result['details'])
 
     def test_periodic_capture_keeps_no_raw_files(self):
         _, capture_dir = self.capture('correct horse', reason='periodic')
@@ -373,10 +412,10 @@ class RouterTemplate(unittest.TestCase):
         except zte.LoginError as e:
             raise module.LoginError(str(e))
         try:
-            led, wan = router.read()
+            led, wan, pon = router.read()
         finally:
             router.logout()
-        return zte.summarise(zte.parse_xml(led), zte.parse_xml(wan))
+        return zte.summarise(zte.parse_xml(led), zte.parse_xml(wan), zte.parse_xml(pon))
 
     def test_the_livebox_redone_from_the_template(self):
         result, _ = self.run_template('correct horse', self.livebox)

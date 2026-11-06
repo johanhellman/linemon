@@ -2,10 +2,10 @@
 """Read fibre and internet status from a ZTE-made Livebox 6s (ZXHN F6640P, Spain).
 
 A linemon capture hook: logs in to the router's web interface, reads the same
-data as its "estado de los indicadores luminosos (LED)" and home pages, logs
-out, and prints one JSON line:
+data as its "estado de los indicadores luminosos (LED)", home and
+"Parámetros del sistema > FIBRA" pages, logs out, and prints one JSON line:
 
-  {"ok": true, "summary": "fibre O5 operational · no LOS · internet up",
+  {"ok": true, "summary": "fibre O5 operational · no LOS · Rx -20 dBm · internet up",
    "uptime_s": 1060, "details": {...}}
 
   zte_livebox.py          run as a linemon hook (uses LINEMON_* environment)
@@ -97,8 +97,26 @@ def parse_xml(text):
     return objects
 
 
-def summarise(led, wan):
-    """Turn the two parsed responses into linemon's hook output."""
+def number(value, scale=1):
+    """A router value as a float (times scale), or None if it is missing or not a number."""
+    try:
+        return round(float(value) * scale, 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def optics(pon):
+    """The ONT's optical readings from the parsed FIBRA page, or {} if there are none."""
+    o = (pon or {}).get('OBJ_PON_OPTICALPARA_ID', [{}])[0]
+    found = {'rx_power_dbm': number(o.get('RxPower')), 'tx_power_dbm': number(o.get('TxPower')),
+             'onu_temp_c': number(o.get('Temp')), 'onu_voltage_v': number(o.get('Volt'), 0.001),
+             'onu_bias_ma': number(o.get('Current'))}
+    return {k: v for k, v in found.items() if v is not None}
+
+
+def summarise(led, wan, pon=None):
+    """Turn the parsed responses into linemon's hook output. `pon` (the FIBRA page) is optional:
+    without it the capture has no optical power, but everything else."""
     reg = int(led['OBJ_GPONREGSTATUS_ID'][0]['RegStatus'])
     los = led.get('OBJ_LOS_INFO_ID', [{}])[0].get('LosInfo', '0') != '0'
     leds = led.get('OBJ_LED_STA_ID', [{}])[0]
@@ -108,6 +126,10 @@ def summarise(led, wan):
     fibre_ok = reg == 5 and not los
 
     parts = [f"fibre {GPON_STATES.get(reg, f'state {reg}')}", 'NO SIGNAL (LOS)' if los else 'no LOS']
+    optical = optics(pon)
+    if 'rx_power_dbm' in optical:
+        # Whole dB, so the analyzer's per-outage timeline splits on a real change, not on noise.
+        parts.append(f"Rx {optical['rx_power_dbm']:.0f} dBm")
     if has_ip:
         parts.append('internet up')
     else:
@@ -123,6 +145,7 @@ def summarise(led, wan):
             'conn_status': internet.get('ConnStatus'), 'conn_error': internet.get('ConnError'),
             'ip': internet.get('IPAddress'), 'gateway': internet.get('GateWay'),
             'vlan': internet.get('VLANID'), 'lease_remaining_s': internet.get('RemainLeaseTime'),
+            **optical,
         },
     }
 
@@ -209,7 +232,15 @@ class Router:
         wan = self._open(f'_type=menuData&_tag=wan_internetstatus_lua.lua&TypeUplink=2&pageType=1&_={ms}')
         self._open(f'_type=menuView&_tag=vmenu-ledstatus&Menu3Location=0&_={ms + 1}')
         led = self._open(f'_type=menuData&_tag=osp_led_status_orange_lua.lua&_={ms + 2}')
-        return led, wan
+        # Optical power comes last and is optional: if the router is too slow for it (it can be,
+        # during an outage), the fibre and internet status above still make the capture.
+        try:
+            self._open(f'_type=menuView&_tag=ospPoninfolStatus&Menu3Location=0&_={ms + 3}')
+            pon = self._open(f'_type=menuData&_tag=osp_poninfo_status_lua.lua&_={ms + 4}')
+        except (TimeoutError, OSError) as e:
+            print(f'optical power not read: {e!r}', file=sys.stderr)
+            pon = None
+        return led, wan, pon
 
 
 def backoff_file():
@@ -259,7 +290,7 @@ def capture():
     except Exception as e:
         return failed('router not reachable', repr(e))
     try:
-        led_xml, wan_xml = router.read()
+        led_xml, wan_xml, pon_xml = router.read()
     except Exception as e:
         return failed('reading status failed', repr(e))
     finally:
@@ -267,11 +298,18 @@ def capture():
 
     capture_dir = os.environ.get('LINEMON_CAPTURE_DIR')
     if capture_dir and os.environ.get('LINEMON_REASON') != 'periodic':
-        for name, text in (('led_status.xml', led_xml), ('wan_status.xml', wan_xml)):
+        for name, text in (('led_status.xml', led_xml), ('wan_status.xml', wan_xml), ('pon_status.xml', pon_xml)):
+            if text is None:
+                continue
             with open(os.path.join(capture_dir, name), 'w') as f:
                 f.write(text)
     try:
-        return summarise(parse_xml(led_xml), parse_xml(wan_xml))
+        pon = parse_xml(pon_xml) if pon_xml is not None else None
+    except Exception as e:  # optional, like reading it
+        print(f'optical power not read: {e!r}', file=sys.stderr)
+        pon = None
+    try:
+        return summarise(parse_xml(led_xml), parse_xml(wan_xml), pon)
     except Exception as e:
         return failed('unexpected response', repr(e))
 
